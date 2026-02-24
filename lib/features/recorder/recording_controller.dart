@@ -1,8 +1,8 @@
 import 'dart:async';
-
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // ADICIONAR no pubspec.yaml
 
 import '../../core/platform/screen_recorder_channel.dart';
 import '../../core/platform/overlay_bubble_channel.dart';
@@ -15,22 +15,86 @@ class RecordingController extends ChangeNotifier {
       _onEvent,
       onError: (e) => debugPrint('❌ EventChannel error: $e'),
     );
+    _loadOrientationMode(); // CARREGA O MODO SALVO
   }
 
   RecordingState state = RecordingState.idle;
   String? lastUri;
-
   Duration elapsed = Duration.zero;
   Timer? _timer;
+
+  // NOVO: modo de orientação selecionado
+  OrientationMode _orientationMode = OrientationMode.auto;
+  OrientationMode get orientationMode => _orientationMode;
 
   bool get isRecording => state == RecordingState.recording;
   bool get isPaused => state == RecordingState.paused;
 
-  // ✅ EventChannel (Android -> Flutter)
-  static const EventChannel _eventChannel =
-      EventChannel('screen_recorder_events');
+  static const EventChannel _eventChannel = EventChannel(
+    'screen_recorder_events',
+  );
 
   StreamSubscription? _eventSub;
+
+  // NOVO: carregar modo salvo
+  Future<void> _loadOrientationMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIndex = prefs.getInt('orientationMode') ?? 0;
+      _orientationMode = OrientationMode.values[savedIndex];
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Erro ao carregar modo de orientação: $e');
+    }
+  }
+
+  // NOVO: salvar e atualizar modo
+  Future<void> setOrientationMode(OrientationMode mode) async {
+    if (_orientationMode == mode) return;
+
+    _orientationMode = mode;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('orientationMode', mode.index);
+    } catch (e) {
+      debugPrint('Erro ao salvar modo de orientação: $e');
+    }
+    notifyListeners();
+  }
+
+  // NOVO: calcular dimensões baseado no modo selecionado
+  Map<String, int> _getDimensionsForMode(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
+    final realW = (size.width * pixelRatio).round();
+    final realH = (size.height * pixelRatio).round();
+
+    switch (_orientationMode) {
+      case OrientationMode.portrait:
+        // Força retrato: menor largura, maior altura
+        return {
+          'width': realW < realH ? realW : realH,
+          'height': realW < realH ? realH : realW,
+        };
+
+      case OrientationMode.landscape:
+        // Força paisagem: maior largura, menor altura
+        return {
+          'width': realW > realH ? realW : realH,
+          'height': realW > realH ? realH : realW,
+        };
+
+      case OrientationMode.square:
+        // Modo quadrado: 1080x1080 (ou o máximo possível)
+        final size = (realW < realH ? realW : realH).clamp(720, 1080);
+        return {'width': size, 'height': size};
+
+      case OrientationMode.auto:
+      default:
+        // Automático: usa orientação atual
+        return {'width': realW, 'height': realH};
+    }
+  }
 
   void _onEvent(dynamic e) {
     final map = Map<String, dynamic>.from(e as Map);
@@ -82,16 +146,7 @@ class RecordingController extends ChangeNotifier {
   Future<void> _ensurePerms() async {
     final mic = await Permission.microphone.request();
     if (!mic.isGranted) throw Exception('Permissão do microfone negada.');
-    await Permission.notification.request(); // Android 13+
-  }
-
-  Map<String, int> _screenPixels(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
-    return {
-      'width': (size.width * pixelRatio).round(),
-      'height': (size.height * pixelRatio).round(),
-    };
+    await Permission.notification.request();
   }
 
   Future<void> start(BuildContext context) async {
@@ -101,12 +156,14 @@ class RecordingController extends ChangeNotifier {
 
     await _ensurePerms();
 
-    final px = _screenPixels(context);
-    final w = px['width']!;
-    final h = px['height']!;
+    // USA AS DIMENSÕES BASEADAS NO MODO SELECIONADO
+    final dims = _getDimensionsForMode(context);
+    final w = dims['width']!;
+    final h = dims['height']!;
 
-    final bitrate =
-        (w * h >= 1920 * 1080) ? 12 * 1000 * 1000 : 8 * 1000 * 1000;
+    final bitrate = (w * h >= 1920 * 1080) ? 12 * 1000 * 1000 : 8 * 1000 * 1000;
+
+    debugPrint('🎥 Iniciando gravação: Modo=${_orientationMode.name} ${w}x$h');
 
     await ScreenRecorderChannel.start(
       width: w,
@@ -114,9 +171,9 @@ class RecordingController extends ChangeNotifier {
       bitrate: bitrate,
       fps: 30,
       recordMic: true,
+      orientationMode: _orientationMode, // PASSA O MODO SELECIONADO
     );
 
-    // ✅ Mostra bolha (se já tiver permissão)
     try {
       final ok = await OverlayBubbleChannel.hasPermission();
       if (ok) await OverlayBubbleChannel.show();
@@ -134,7 +191,6 @@ class RecordingController extends ChangeNotifier {
     if (state != RecordingState.recording) return;
     await ScreenRecorderChannel.pause();
 
-    // UI imediata (EventChannel também vai refletir)
     state = RecordingState.paused;
     _stopTimer();
     notifyListeners();
@@ -157,18 +213,15 @@ class RecordingController extends ChangeNotifier {
 
     await ScreenRecorderChannel.stop();
 
-    // ✅ Esconde bolha
     try {
       await OverlayBubbleChannel.hide();
     } catch (e) {
       debugPrint('⚠️ Falha ao esconder bolha: $e');
     }
 
-    // Atualiza lastUri/state/elapsed
     await syncFromNative();
   }
 
-  // Timer local (UI suave)
   void _startTimer() {
     _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
       elapsed += const Duration(seconds: 1);

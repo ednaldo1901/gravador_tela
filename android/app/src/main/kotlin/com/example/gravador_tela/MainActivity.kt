@@ -8,19 +8,20 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.view.OrientationEventListener
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import kotlin.math.max
-import kotlin.math.min
 
 class MainActivity : FlutterActivity() {
 
     companion object {
         const val EXTRA_START_FROM_BUBBLE = "START_FROM_BUBBLE"
+        const val ORIENTATION_MODE_AUTO = 0
+        const val ORIENTATION_MODE_PORTRAIT = 1
+        const val ORIENTATION_MODE_LANDSCAPE = 2
+        const val ORIENTATION_MODE_SQUARE = 3
     }
 
     private val CHANNEL = "screen_recorder"
@@ -29,7 +30,6 @@ class MainActivity : FlutterActivity() {
 
     private var pendingOptions: Map<String, Any>? = null
     private var pendingResult: MethodChannel.Result? = null
-    private var orientationListener: OrientationEventListener? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -48,7 +48,6 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "stopRecording" -> {
-                        stopOrientationMonitoring()
                         startService(Intent(this, ScreenRecordService::class.java).apply {
                             action = ScreenRecordService.ACTION_STOP
                         })
@@ -103,19 +102,6 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
-                    "getCurrentOrientation" -> {
-                        val orientation = resources.configuration.orientation
-                        val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE
-                        val (width, height) = getRealScreenPx()
-                        
-                        val map = HashMap<String, Any>()
-                        map["isLandscape"] = isLandscape
-                        map["width"] = width
-                        map["height"] = height
-                        map["rotation"] = getScreenRotation()
-                        result.success(map)
-                    }
-
                     else -> result.notImplemented()
                 }
             }
@@ -160,75 +146,22 @@ class MainActivity : FlutterActivity() {
         return wm.defaultDisplay.rotation
     }
 
-    private fun getDimensionsForCurrentOrientation(): Triple<Int, Int, Boolean> {
-        val (width, height) = getRealScreenPx()
-        val rotation = getScreenRotation()
-        val orientation = resources.configuration.orientation
-        
-        val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE ||
-                rotation == 1 || rotation == 3 // 90° ou 270°
-        
-        return if (isLandscape) {
-            // Em paisagem: largura deve ser maior que altura
-            Triple(max(width, height), min(width, height), true)
-        } else {
-            // Em retrato: largura deve ser menor que altura
-            Triple(min(width, height), max(width, height), false)
-        }
-    }
-
     private fun handleStartFromBubbleIntent(i: Intent?) {
         val startFromBubble = i?.getBooleanExtra(EXTRA_START_FROM_BUBBLE, false) == true
         if (!startFromBubble) return
 
-        // usa a orientação ATUAL para definir as dimensões
-        val (w, h, isLandscape) = getDimensionsForCurrentOrientation()
-
-        // bitrate proporcional
-        val bitrate = if (w * h >= 1920 * 1080) 12_000_000 else 8_000_000
-
+        // Modo AUTO por padrão quando vem da bolha
         pendingOptions = mapOf(
-            "width" to w,
-            "height" to h,
-            "bitrate" to bitrate,
+            "orientationMode" to ORIENTATION_MODE_AUTO,
             "fps" to 30,
-            "recordMic" to true,
-            "isLandscape" to isLandscape
+            "bitrate" to 8_000_000,
+            "recordMic" to true
         )
         pendingResult = null
 
         val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val intent = mpm.createScreenCaptureIntent()
         startActivityForResult(intent, REQ_MEDIA_PROJECTION)
-    }
-
-    private fun startOrientationMonitoring() {
-        if (orientationListener == null) {
-            orientationListener = object : OrientationEventListener(this) {
-                override fun onOrientationChanged(orientation: Int) {
-                    if (orientation == OrientationEventListener.ORIENTATION_UNKNOWN) return
-                    
-                    // Detecta se é paisagem (entre 45-135 ou 225-315 graus)
-                    val isLandscape = (orientation >= 45 && orientation < 135) || 
-                                     (orientation >= 225 && orientation < 315)
-                    
-                    // Envia para o serviço quando a orientação muda
-                    if (ScreenRecordService.state == ScreenRecordService.RecState.RECORDING) {
-                        val intent = Intent(this@MainActivity, ScreenRecordService::class.java).apply {
-                            action = "ACTION_UPDATE_ORIENTATION"
-                            putExtra("EXTRA_IS_LANDSCAPE", isLandscape)
-                        }
-                        startService(intent)
-                    }
-                }
-            }
-            orientationListener?.enable()
-        }
-    }
-
-    private fun stopOrientationMonitoring() {
-        orientationListener?.disable()
-        orientationListener = null
     }
 
     @Deprecated("Deprecated in Java")
@@ -247,18 +180,29 @@ class MainActivity : FlutterActivity() {
                 return
             }
 
+            // Pega o modo de orientação escolhido pelo usuário
+            val orientationMode = opts["orientationMode"] as Int? ?: ORIENTATION_MODE_AUTO
+            
+            // Calcula as dimensões baseado no modo escolhido
+            val (width, height) = calculateDimensions(orientationMode)
+            
+            // Bitrate
+            val bitrate = opts["bitrate"] as Int? ?: 8_000_000
+            val fps = opts["fps"] as Int? ?: 30
+            val recordMic = opts["recordMic"] as Boolean? ?: true
+
+            android.util.Log.d("MAIN", "📱 Modo: $orientationMode | Dimensões: ${width}x${height}")
+
             val intent = Intent(this, ScreenRecordService::class.java).apply {
                 action = ScreenRecordService.ACTION_START
                 putExtra(ScreenRecordService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(ScreenRecordService.EXTRA_DATA_INTENT, data)
-                putExtra(ScreenRecordService.EXTRA_WIDTH, opts["width"] as Int)
-                putExtra(ScreenRecordService.EXTRA_HEIGHT, opts["height"] as Int)
-                putExtra(ScreenRecordService.EXTRA_BITRATE, opts["bitrate"] as Int)
-                putExtra(ScreenRecordService.EXTRA_FPS, opts["fps"] as Int)
-                putExtra(ScreenRecordService.EXTRA_RECORD_MIC, opts["recordMic"] as Boolean)
-                
-                val isLandscape = opts["isLandscape"] as? Boolean ?: false
-                putExtra(ScreenRecordService.EXTRA_IS_LANDSCAPE, isLandscape)
+                putExtra(ScreenRecordService.EXTRA_WIDTH, width)
+                putExtra(ScreenRecordService.EXTRA_HEIGHT, height)
+                putExtra(ScreenRecordService.EXTRA_BITRATE, bitrate)
+                putExtra(ScreenRecordService.EXTRA_FPS, fps)
+                putExtra(ScreenRecordService.EXTRA_RECORD_MIC, recordMic)
+                putExtra(ScreenRecordService.EXTRA_ORIENTATION_MODE, orientationMode)
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -267,15 +211,40 @@ class MainActivity : FlutterActivity() {
                 startService(intent)
             }
             
-            // Inicia o monitoramento de orientação
-            startOrientationMonitoring()
-            
             res?.success(null)
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        stopOrientationMonitoring()
+    private fun calculateDimensions(mode: Int): Pair<Int, Int> {
+        val (realW, realH) = getRealScreenPx()
+        
+        return when (mode) {
+            ORIENTATION_MODE_PORTRAIT -> {
+                // Força retrato: menor largura, maior altura
+                Pair(minOf(realW, realH), maxOf(realW, realH))
+            }
+            ORIENTATION_MODE_LANDSCAPE -> {
+                // Força paisagem: maior largura, menor altura
+                Pair(maxOf(realW, realH), minOf(realW, realH))
+            }
+            ORIENTATION_MODE_SQUARE -> {
+                // Modo quadrado: 1080x1080 (ou o máximo possível mantendo quadrado)
+                val size = minOf(realW, realH, 1080)
+                Pair(size, size)
+            }
+            else -> { // AUTO
+                // Usa a orientação atual do dispositivo
+                val rotation = getScreenRotation()
+                val isLandscape = rotation == 1 || rotation == 3
+                if (isLandscape) {
+                    Pair(maxOf(realW, realH), minOf(realW, realH))
+                } else {
+                    Pair(minOf(realW, realH), maxOf(realW, realH))
+                }
+            }
+        }
     }
+
+    private fun minOf(a: Int, b: Int): Int = if (a < b) a else b
+    private fun maxOf(a: Int, b: Int): Int = if (a > b) a else b
 }

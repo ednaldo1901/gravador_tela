@@ -4,7 +4,6 @@ import android.app.*
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.graphics.Point
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaRecorder
@@ -14,7 +13,6 @@ import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
 import android.util.Log
-import android.view.Display
 import android.view.WindowManager
 import io.flutter.plugin.common.EventChannel
 import java.text.SimpleDateFormat
@@ -30,7 +28,6 @@ class ScreenRecordService : Service() {
         const val ACTION_STOP = "ACTION_STOP"
         const val ACTION_PAUSE = "ACTION_PAUSE"
         const val ACTION_RESUME = "ACTION_RESUME"
-        const val ACTION_UPDATE_ORIENTATION = "ACTION_UPDATE_ORIENTATION"
 
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_DATA_INTENT = "EXTRA_DATA_INTENT"
@@ -39,14 +36,18 @@ class ScreenRecordService : Service() {
         const val EXTRA_BITRATE = "EXTRA_BITRATE"
         const val EXTRA_FPS = "EXTRA_FPS"
         const val EXTRA_RECORD_MIC = "EXTRA_RECORD_MIC"
-        const val EXTRA_IS_LANDSCAPE = "EXTRA_IS_LANDSCAPE"
+        const val EXTRA_ORIENTATION_MODE = "EXTRA_ORIENTATION_MODE"
 
         private const val NOTIF_CHANNEL_ID = "screen_record_channel"
         private const val NOTIF_ID = 101
 
         @Volatile var lastOutputUriString: String? = null
         @Volatile var state: RecState = RecState.IDLE
+
+        // EventChannel sink
         @Volatile var eventSink: EventChannel.EventSink? = null
+
+        // Timer
         @Volatile var startTime = 0L
         @Volatile var pauseOffset = 0L
 
@@ -66,23 +67,17 @@ class ScreenRecordService : Service() {
     private var outputUri: Uri? = null
     private var outputPfd: ParcelFileDescriptor? = null
 
-    private var currentWidth = 720
-    private var currentHeight = 1280
-    private var isLandscape = false
+    private var currentWidth = 0
+    private var currentHeight = 0
+    private var orientationMode = 0 // AUTO = 0, PORTRAIT = 1, LANDSCAPE = 2, SQUARE = 3
     private var isRecording = false
-    private var lastBitrate = 8_000_000
-    private var lastFps = 30
-    private var lastRecordMic = true
-    private var lastResultCode = 0
-    private var lastDataIntent: Intent? = null
-
-    private val handler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // NÃO configuramos mais o listener de orientação
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -91,7 +86,6 @@ class ScreenRecordService : Service() {
             ACTION_PAUSE -> pauseRecording()
             ACTION_RESUME -> resumeRecording()
             ACTION_STOP -> stopRecording()
-            ACTION_UPDATE_ORIENTATION -> updateOrientation(intent)
         }
         return START_NOT_STICKY
     }
@@ -102,66 +96,7 @@ class ScreenRecordService : Service() {
         map["state"] = state.name.lowercase()
         map["lastUri"] = lastOutputUriString
         map["elapsed"] = getElapsedForFlutter()
-        map["isLandscape"] = isLandscape
-        map["width"] = currentWidth
-        map["height"] = currentHeight
         eventSink?.success(map)
-    }
-
-    private fun updateOrientation(intent: Intent) {
-        val newIsLandscape = intent.getBooleanExtra(EXTRA_IS_LANDSCAPE, false)
-        
-        if (newIsLandscape != isLandscape && isRecording) {
-            Log.d("REC", "🔄 Orientação mudou: ${if (newIsLandscape) "Paisagem" else "Retrato"}")
-            isLandscape = newIsLandscape
-            
-            // Atualiza as dimensões baseado na orientação
-            if (isLandscape) {
-                // Em paisagem, largura > altura
-                currentWidth = maxOf(currentWidth, currentHeight)
-                currentHeight = minOf(currentWidth, currentHeight)
-            } else {
-                // Em retrato, altura > largura
-                currentHeight = maxOf(currentWidth, currentHeight)
-                currentWidth = minOf(currentWidth, currentHeight)
-            }
-            
-            Log.d("REC", "📱 Novas dimensões: ${currentWidth}x${currentHeight}")
-            
-            // Reinicia a gravação com as novas dimensões
-            restartRecording()
-        }
-    }
-
-    private fun restartRecording() {
-        if (!isRecording) return
-        
-        Log.d("REC", "🔄 Reiniciando gravação com novas dimensões...")
-        
-        // Para a gravação atual
-        stopRecording()
-        
-        // Aguarda um pouco
-        handler.postDelayed({
-            // Inicia nova gravação com as dimensões atualizadas
-            val intent = Intent(this, ScreenRecordService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_RESULT_CODE, lastResultCode)
-                putExtra(EXTRA_DATA_INTENT, lastDataIntent)
-                putExtra(EXTRA_WIDTH, currentWidth)
-                putExtra(EXTRA_HEIGHT, currentHeight)
-                putExtra(EXTRA_BITRATE, lastBitrate)
-                putExtra(EXTRA_FPS, lastFps)
-                putExtra(EXTRA_RECORD_MIC, lastRecordMic)
-                putExtra(EXTRA_IS_LANDSCAPE, isLandscape)
-            }
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-        }, 500)
     }
 
     private fun startRecording(intent: Intent) {
@@ -179,19 +114,23 @@ class ScreenRecordService : Service() {
             return
         }
 
-        // Salva dados para possível reinicialização
-        lastResultCode = resultCode
-        lastDataIntent = dataIntent
-        lastBitrate = intent.getIntExtra(EXTRA_BITRATE, 8_000_000)
-        lastFps = intent.getIntExtra(EXTRA_FPS, 30)
-        lastRecordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
-        isLandscape = intent.getBooleanExtra(EXTRA_IS_LANDSCAPE, false)
-
-        // Pega as dimensões iniciais
+        // Pega as dimensões e modo escolhido pelo usuário
         currentWidth = intent.getIntExtra(EXTRA_WIDTH, 720)
         currentHeight = intent.getIntExtra(EXTRA_HEIGHT, 1280)
+        orientationMode = intent.getIntExtra(EXTRA_ORIENTATION_MODE, 0) // 0 = AUTO
         
-        Log.d("REC", "📱 Iniciando gravação: ${currentWidth}x${currentHeight} | Landscape: $isLandscape")
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE, 8_000_000)
+        val fps = intent.getIntExtra(EXTRA_FPS, 30)
+        val recordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
+
+        val modeName = when (orientationMode) {
+            1 -> "RETRATO"
+            2 -> "PAISAGEM"
+            3 -> "QUADRADO"
+            else -> "AUTO"
+        }
+        
+        Log.d("REC", "📱 Iniciando gravação: ${currentWidth}x${currentHeight} | Modo: $modeName")
 
         val (uri, pfd) = createMediaStoreOutput()
         outputUri = uri
@@ -210,41 +149,28 @@ class ScreenRecordService : Service() {
 
         try {
             recorder = MediaRecorder().apply {
-                setVideoSource(MediaRecorder.VideoSource.SURFACE)
-                
-                if (lastRecordMic) {
-                    try {
-                        setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-                    } catch (e: Exception) {
-                        Log.e("REC", "❌ Falha ao configurar áudio: ${e.message}")
-                    }
-                }
+                if (recordMic) setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
 
+                setVideoSource(MediaRecorder.VideoSource.SURFACE)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setOutputFile(outputPfd!!.fileDescriptor)
 
                 setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-                setVideoEncodingBitRate(lastBitrate)
-                setVideoFrameRate(lastFps)
+                setVideoEncodingBitRate(bitrate)
+                setVideoFrameRate(fps)
                 setVideoSize(currentWidth, currentHeight)
 
-                if (lastRecordMic) {
-                    try {
-                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                        setAudioEncodingBitRate(192_000)
-                        setAudioSamplingRate(48000)
-                        setAudioChannels(1)
-                    } catch (e: Exception) {
-                        Log.e("REC", "❌ Falha ao configurar encoder de áudio: ${e.message}")
-                    }
+                if (recordMic) {
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setAudioEncodingBitRate(192_000)
+                    setAudioSamplingRate(48_000)
+                    setAudioChannels(1)
                 }
-                
                 prepare()
                 Log.d("REC", "✅ MediaRecorder preparado")
             }
         } catch (e: Exception) {
             Log.e("REC", "❌ Erro ao configurar MediaRecorder: ${e.message}")
-            sendEvent("error")
             stopSelf()
             return
         }
@@ -264,7 +190,6 @@ class ScreenRecordService : Service() {
             Log.d("REC", "✅ VirtualDisplay criado")
         } catch (e: Exception) {
             Log.e("REC", "❌ Erro ao criar VirtualDisplay: ${e.message}")
-            sendEvent("error")
             stopSelf()
             return
         }
@@ -276,7 +201,6 @@ class ScreenRecordService : Service() {
             notifyUpdateNotification()
         } catch (e: Exception) {
             Log.e("REC", "❌ Erro ao iniciar gravação: ${e.message}")
-            sendEvent("error")
             stopSelf()
         }
     }
@@ -390,15 +314,21 @@ class ScreenRecordService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, NOTIF_CHANNEL_ID)
-        } else {
-            Notification.Builder(this)
+        val builder =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                Notification.Builder(this, NOTIF_CHANNEL_ID)
+            else
+                Notification.Builder(this)
+
+        val modoText = when (orientationMode) {
+            1 -> "📱 Retrato"
+            2 -> "🌍 Paisagem"
+            3 -> "⬛ Quadrado"
+            else -> "🔄 Auto"
         }
 
-        val orientationText = if (isLandscape) "🌍 Paisagem" else "📱 Retrato"
         val text = when (current) {
-            RecState.RECORDING -> "Gravando $orientationText ${currentWidth}x${currentHeight}"
+            RecState.RECORDING -> "Gravando $modoText ${currentWidth}x${currentHeight}"
             RecState.PAUSED -> "Pausado"
             RecState.STOPPING -> "Finalizando..."
             RecState.IDLE -> "Pronto"
@@ -408,9 +338,8 @@ class ScreenRecordService : Service() {
             .setContentTitle("Gravador de Tela")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.presence_video_online)
-            .setOngoing(current != RecState.IDLE)
+            .setOngoing(current == RecState.RECORDING || current == RecState.PAUSED || current == RecState.STOPPING)
             .setContentIntent(openAppPending)
-            .setPriority(Notification.PRIORITY_LOW)
 
         if (current == RecState.RECORDING) {
             builder.addAction(0, "Pausar", pausePending)

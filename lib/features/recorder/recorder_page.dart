@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:gravador_tela/core/platform/screen_recorder_channel.dart';
 import 'package:provider/provider.dart';
 import 'recording_controller.dart';
 
@@ -9,6 +10,20 @@ class RecorderPage extends StatelessWidget {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  // NOVO: função para obter o texto do modo de orientação
+  String _getModeText(RecordingController rec) {
+    switch (rec.orientationMode) {
+      case OrientationMode.portrait:
+        return '📱 Retrato';
+      case OrientationMode.landscape:
+        return '🌍 Paisagem';
+      case OrientationMode.square:
+        return '⬛ Quadrado';
+      case OrientationMode.auto:
+        return '🔄 Auto';
+    }
   }
 
   @override
@@ -27,7 +42,8 @@ class RecorderPage extends StatelessWidget {
         actions: [
           IconButton(
             onPressed: () {
-              // abre aba Config depois (ou navegue se quiser)
+              // Navega para a página de configurações
+              // Ajuste conforme sua navegação
             },
             icon: const Icon(Icons.settings),
           ),
@@ -102,7 +118,7 @@ class RecorderPage extends StatelessWidget {
 
                 const SizedBox(height: 16),
 
-                // barra info (resolução/áudio) parecida com imagem
+                // ✅ BARRA DE INFO MODIFICADA - mostra o modo selecionado
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 14,
@@ -114,10 +130,10 @@ class RecorderPage extends StatelessWidget {
                   ),
                   child: Text(
                     isRecording
-                        ? 'Gravando: ${_fmt(rec.elapsed)} | Áudio: Microfone'
+                        ? 'Gravando: ${_fmt(rec.elapsed)} | ${_getModeText(rec)}'
                         : (isPaused
-                              ? 'Pausado: ${_fmt(rec.elapsed)} | Áudio: Microfone'
-                              : 'Resolução: Auto | Áudio: Microfone'),
+                              ? 'Pausado: ${_fmt(rec.elapsed)} | ${_getModeText(rec)}'
+                              : 'Modo: ${_getModeText(rec)} | Áudio: Microfone'),
                     style: const TextStyle(color: Colors.white),
                   ),
                 ),

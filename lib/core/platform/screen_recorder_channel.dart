@@ -1,5 +1,13 @@
 import 'package:flutter/services.dart';
 
+// Enum para modos de orientação
+enum OrientationMode {
+  auto,      // Automático - detecta orientação atual
+  portrait,  // Força retrato
+  landscape, // Força paisagem
+  square,    // Quadrado (1080x1080)
+}
+
 class ScreenRecorderChannel {
   static const _channel = MethodChannel('screen_recorder');
 
@@ -9,6 +17,7 @@ class ScreenRecorderChannel {
     required int bitrate,
     required int fps,
     required bool recordMic,
+    required OrientationMode orientationMode, // NOVO PARÂMETRO
   }) async {
     await _channel.invokeMethod('startRecording', {
       'width': width,
@@ -16,6 +25,7 @@ class ScreenRecorderChannel {
       'bitrate': bitrate,
       'fps': fps,
       'recordMic': recordMic,
+      'orientationMode': orientationMode.index, // 0,1,2,3
     });
   }
 
