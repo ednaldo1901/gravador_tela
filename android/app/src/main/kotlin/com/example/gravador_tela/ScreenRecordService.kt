@@ -4,7 +4,6 @@ import android.app.*
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.graphics.Point
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -21,8 +20,6 @@ import io.flutter.plugin.common.EventChannel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.max
-import kotlin.math.min
 
 class ScreenRecordService : Service() {
 
@@ -33,6 +30,7 @@ class ScreenRecordService : Service() {
         const val ACTION_STOP = "ACTION_STOP"
         const val ACTION_PAUSE = "ACTION_PAUSE"
         const val ACTION_RESUME = "ACTION_RESUME"
+        const val ACTION_UPDATE_ORIENTATION = "ACTION_UPDATE_ORIENTATION"
 
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_DATA_INTENT = "EXTRA_DATA_INTENT"
@@ -41,17 +39,14 @@ class ScreenRecordService : Service() {
         const val EXTRA_BITRATE = "EXTRA_BITRATE"
         const val EXTRA_FPS = "EXTRA_FPS"
         const val EXTRA_RECORD_MIC = "EXTRA_RECORD_MIC"
+        const val EXTRA_IS_LANDSCAPE = "EXTRA_IS_LANDSCAPE"
 
         private const val NOTIF_CHANNEL_ID = "screen_record_channel"
         private const val NOTIF_ID = 101
 
         @Volatile var lastOutputUriString: String? = null
         @Volatile var state: RecState = RecState.IDLE
-
-        // EventChannel sink
         @Volatile var eventSink: EventChannel.EventSink? = null
-
-        // Timer
         @Volatile var startTime = 0L
         @Volatile var pauseOffset = 0L
 
@@ -71,10 +66,15 @@ class ScreenRecordService : Service() {
     private var outputUri: Uri? = null
     private var outputPfd: ParcelFileDescriptor? = null
 
-    private var currentWidth = 0
-    private var currentHeight = 0
+    private var currentWidth = 720
+    private var currentHeight = 1280
     private var isLandscape = false
     private var isRecording = false
+    private var lastBitrate = 8_000_000
+    private var lastFps = 30
+    private var lastRecordMic = true
+    private var lastResultCode = 0
+    private var lastDataIntent: Intent? = null
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -83,7 +83,6 @@ class ScreenRecordService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        setupOrientationListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -92,6 +91,7 @@ class ScreenRecordService : Service() {
             ACTION_PAUSE -> pauseRecording()
             ACTION_RESUME -> resumeRecording()
             ACTION_STOP -> stopRecording()
+            ACTION_UPDATE_ORIENTATION -> updateOrientation(intent)
         }
         return START_NOT_STICKY
     }
@@ -102,94 +102,67 @@ class ScreenRecordService : Service() {
         map["state"] = state.name.lowercase()
         map["lastUri"] = lastOutputUriString
         map["elapsed"] = getElapsedForFlutter()
+        map["isLandscape"] = isLandscape
+        map["width"] = currentWidth
+        map["height"] = currentHeight
         eventSink?.success(map)
     }
 
-    private fun setupOrientationListener() {
-        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        displayManager.registerDisplayListener(object : DisplayManager.DisplayListener {
-            override fun onDisplayAdded(displayId: Int) {}
-            override fun onDisplayRemoved(displayId: Int) {}
+    private fun updateOrientation(intent: Intent) {
+        val newIsLandscape = intent.getBooleanExtra(EXTRA_IS_LANDSCAPE, false)
+        
+        if (newIsLandscape != isLandscape && isRecording) {
+            Log.d("REC", "🔄 Orientação mudou: ${if (newIsLandscape) "Paisagem" else "Retrato"}")
+            isLandscape = newIsLandscape
             
-            override fun onDisplayChanged(displayId: Int) {
-                if (displayId == Display.DEFAULT_DISPLAY && isRecording) {
-                    checkOrientationAndRestartIfNeeded()
-                }
+            // Atualiza as dimensões baseado na orientação
+            if (isLandscape) {
+                // Em paisagem, largura > altura
+                currentWidth = maxOf(currentWidth, currentHeight)
+                currentHeight = minOf(currentWidth, currentHeight)
+            } else {
+                // Em retrato, altura > largura
+                currentHeight = maxOf(currentWidth, currentHeight)
+                currentWidth = minOf(currentWidth, currentHeight)
             }
-        }, handler)
-    }
-
-    // ✅ Verifica se a orientação mudou e reinicia a gravação se necessário
-    private fun checkOrientationAndRestartIfNeeded() {
-        val newOrientation = resources.configuration.orientation
-        val newIsLandscape = newOrientation == Configuration.ORIENTATION_LANDSCAPE
-        
-        if (newIsLandscape != isLandscape && state == RecState.RECORDING) {
-            Log.d("REC", "🔄 Orientação mudou! Reiniciando gravação...")
             
-            // Pausa temporariamente
-            val wasRecording = true
-            pauseRecording()
+            Log.d("REC", "📱 Novas dimensões: ${currentWidth}x${currentHeight}")
             
-            // Pega novas dimensões
-            val (newWidth, newHeight) = getCurrentScreenDimensions()
-            
-            // Reinicia com as novas dimensões
-            handler.postDelayed({
-                if (wasRecording) {
-                    restartRecordingWithNewDimensions(newWidth, newHeight, newIsLandscape)
-                }
-            }, 500)
+            // Reinicia a gravação com as novas dimensões
+            restartRecording()
         }
     }
 
-    private fun getCurrentScreenDimensions(): Pair<Int, Int> {
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val display = wm.defaultDisplay
-        val point = Point()
-        display.getRealSize(point)
+    private fun restartRecording() {
+        if (!isRecording) return
         
-        return if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            Pair(max(point.x, point.y), min(point.x, point.y))
-        } else {
-            Pair(min(point.x, point.y), max(point.x, point.y))
-        }
-    }
-
-    // ✅ Reinicia a gravação com novas dimensões
-    private fun restartRecordingWithNewDimensions(newWidth: Int, newHeight: Int, newIsLandscape: Boolean) {
-        try {
-            // Para a gravação atual
-            stopRecording()
-            
-            // Aguarda um pouco
-            Thread.sleep(300)
-            
-            // Reinicia com as novas dimensões
+        Log.d("REC", "🔄 Reiniciando gravação com novas dimensões...")
+        
+        // Para a gravação atual
+        stopRecording()
+        
+        // Aguarda um pouco
+        handler.postDelayed({
+            // Inicia nova gravação com as dimensões atualizadas
             val intent = Intent(this, ScreenRecordService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_RESULT_CODE, lastResultCode)
                 putExtra(EXTRA_DATA_INTENT, lastDataIntent)
-                putExtra(EXTRA_WIDTH, newWidth)
-                putExtra(EXTRA_HEIGHT, newHeight)
+                putExtra(EXTRA_WIDTH, currentWidth)
+                putExtra(EXTRA_HEIGHT, currentHeight)
                 putExtra(EXTRA_BITRATE, lastBitrate)
                 putExtra(EXTRA_FPS, lastFps)
                 putExtra(EXTRA_RECORD_MIC, lastRecordMic)
-                putExtra("EXTRA_IS_LANDSCAPE", newIsLandscape)
+                putExtra(EXTRA_IS_LANDSCAPE, isLandscape)
             }
             
-            startService(intent)
-            Log.d("REC", "✅ Gravação reiniciada com dimensões: ${newWidth}x${newHeight}")
-        } catch (e: Exception) {
-            Log.e("REC", "❌ Erro ao reiniciar gravação: ${e.message}")
-        }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        }, 500)
     }
-
-    private var lastResultCode = 0
-    private var lastDataIntent: Intent? = null
-    private var lastBitrate = 8_000_000
-    private var lastFps = 30
-    private var lastRecordMic = true
 
     private fun startRecording(intent: Intent) {
         if (state == RecState.RECORDING || state == RecState.PAUSED) return
@@ -206,16 +179,17 @@ class ScreenRecordService : Service() {
             return
         }
 
-        // Salva para possível reinicialização
+        // Salva dados para possível reinicialização
         lastResultCode = resultCode
         lastDataIntent = dataIntent
         lastBitrate = intent.getIntExtra(EXTRA_BITRATE, 8_000_000)
         lastFps = intent.getIntExtra(EXTRA_FPS, 30)
         lastRecordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
+        isLandscape = intent.getBooleanExtra(EXTRA_IS_LANDSCAPE, false)
 
-        currentWidth = intent.getIntExtra(EXTRA_WIDTH, 1280)
-        currentHeight = intent.getIntExtra(EXTRA_HEIGHT, 720)
-        isLandscape = intent.getBooleanExtra("EXTRA_IS_LANDSCAPE", false)
+        // Pega as dimensões iniciais
+        currentWidth = intent.getIntExtra(EXTRA_WIDTH, 720)
+        currentHeight = intent.getIntExtra(EXTRA_HEIGHT, 1280)
         
         Log.d("REC", "📱 Iniciando gravação: ${currentWidth}x${currentHeight} | Landscape: $isLandscape")
 
@@ -234,43 +208,77 @@ class ScreenRecordService : Service() {
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpm.getMediaProjection(resultCode, dataIntent)
 
-        recorder = MediaRecorder().apply {
-            if (lastRecordMic) setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+        try {
+            recorder = MediaRecorder().apply {
+                setVideoSource(MediaRecorder.VideoSource.SURFACE)
+                
+                if (lastRecordMic) {
+                    try {
+                        setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                    } catch (e: Exception) {
+                        Log.e("REC", "❌ Falha ao configurar áudio: ${e.message}")
+                    }
+                }
 
-            setVideoSource(MediaRecorder.VideoSource.SURFACE)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setOutputFile(outputPfd!!.fileDescriptor)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setOutputFile(outputPfd!!.fileDescriptor)
 
-            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            setVideoEncodingBitRate(lastBitrate)
-            setVideoFrameRate(lastFps)
-            setVideoSize(currentWidth, currentHeight)
+                setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+                setVideoEncodingBitRate(lastBitrate)
+                setVideoFrameRate(lastFps)
+                setVideoSize(currentWidth, currentHeight)
 
-            if (lastRecordMic) {
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(192_000)
-                setAudioSamplingRate(48_000)
-                setAudioChannels(1)
+                if (lastRecordMic) {
+                    try {
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setAudioEncodingBitRate(192_000)
+                        setAudioSamplingRate(48000)
+                        setAudioChannels(1)
+                    } catch (e: Exception) {
+                        Log.e("REC", "❌ Falha ao configurar encoder de áudio: ${e.message}")
+                    }
+                }
+                
+                prepare()
+                Log.d("REC", "✅ MediaRecorder preparado")
             }
-            prepare()
+        } catch (e: Exception) {
+            Log.e("REC", "❌ Erro ao configurar MediaRecorder: ${e.message}")
+            sendEvent("error")
+            stopSelf()
+            return
         }
 
-        val surface = recorder!!.surface
-        virtualDisplay = mediaProjection!!.createVirtualDisplay(
-            "ScreenRecorderDisplay",
-            currentWidth,
-            currentHeight,
-            resources.displayMetrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            surface,
-            null,
-            null
-        )
+        try {
+            val surface = recorder!!.surface
+            virtualDisplay = mediaProjection!!.createVirtualDisplay(
+                "ScreenRecorderDisplay",
+                currentWidth,
+                currentHeight,
+                resources.displayMetrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                surface,
+                null,
+                null
+            )
+            Log.d("REC", "✅ VirtualDisplay criado")
+        } catch (e: Exception) {
+            Log.e("REC", "❌ Erro ao criar VirtualDisplay: ${e.message}")
+            sendEvent("error")
+            stopSelf()
+            return
+        }
 
-        recorder!!.start()
-        Log.d("REC", "✅ Gravando... Dimensões: ${currentWidth}x${currentHeight}")
-        sendEvent("start")
-        notifyUpdateNotification()
+        try {
+            recorder!!.start()
+            Log.d("REC", "✅ Gravação iniciada")
+            sendEvent("start")
+            notifyUpdateNotification()
+        } catch (e: Exception) {
+            Log.e("REC", "❌ Erro ao iniciar gravação: ${e.message}")
+            sendEvent("error")
+            stopSelf()
+        }
     }
 
     private fun pauseRecording() {
@@ -318,13 +326,13 @@ class ScreenRecordService : Service() {
         } catch (e: Exception) {
             Log.d("REC", "⚠️ recorder.stop falhou: ${e.message}")
         } finally {
-            recorder?.release()
+            try { recorder?.release() } catch (_: Exception) {}
             recorder = null
 
-            virtualDisplay?.release()
+            try { virtualDisplay?.release() } catch (_: Exception) {}
             virtualDisplay = null
 
-            mediaProjection?.stop()
+            try { mediaProjection?.stop() } catch (_: Exception) {}
             mediaProjection = null
         }
 
@@ -333,8 +341,10 @@ class ScreenRecordService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             outputUri?.let { uri ->
-                val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                contentResolver.update(uri, values, null, null)
+                try {
+                    val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                    contentResolver.update(uri, values, null, null)
+                } catch (_: Exception) {}
             }
         }
 
@@ -349,47 +359,46 @@ class ScreenRecordService : Service() {
     }
 
     private fun notifyUpdateNotification() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_ID, buildNotification(state))
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIF_ID, buildNotification(state))
+        } catch (_: Exception) {}
     }
 
     private fun buildNotification(current: RecState): Notification {
         val stopIntent = Intent(this, ScreenRecordService::class.java).apply { action = ACTION_STOP }
         val stopPending = PendingIntent.getService(
             this, 2001, stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val pauseIntent = Intent(this, ScreenRecordService::class.java).apply { action = ACTION_PAUSE }
         val pausePending = PendingIntent.getService(
             this, 2002, pauseIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val resumeIntent = Intent(this, ScreenRecordService::class.java).apply { action = ACTION_RESUME }
         val resumePending = PendingIntent.getService(
             this, 2003, resumeIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)
         val openAppPending = PendingIntent.getActivity(
             this, 2004, openAppIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                Notification.Builder(this, NOTIF_CHANNEL_ID)
-            else
-                Notification.Builder(this)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, NOTIF_CHANNEL_ID)
+        } else {
+            Notification.Builder(this)
+        }
 
+        val orientationText = if (isLandscape) "🌍 Paisagem" else "📱 Retrato"
         val text = when (current) {
-            RecState.RECORDING -> "Gravando... ${currentWidth}x${currentHeight}"
+            RecState.RECORDING -> "Gravando $orientationText ${currentWidth}x${currentHeight}"
             RecState.PAUSED -> "Pausado"
             RecState.STOPPING -> "Finalizando..."
             RecState.IDLE -> "Pronto"
@@ -399,35 +408,18 @@ class ScreenRecordService : Service() {
             .setContentTitle("Gravador de Tela")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.presence_video_online)
-            .setOngoing(current == RecState.RECORDING || current == RecState.PAUSED || current == RecState.STOPPING)
+            .setOngoing(current != RecState.IDLE)
             .setContentIntent(openAppPending)
+            .setPriority(Notification.PRIORITY_LOW)
 
         if (current == RecState.RECORDING) {
-            builder.addAction(
-                Notification.Action.Builder(
-                    android.R.drawable.ic_media_pause,
-                    "Pausar",
-                    pausePending
-                ).build()
-            )
+            builder.addAction(0, "Pausar", pausePending)
         } else if (current == RecState.PAUSED) {
-            builder.addAction(
-                Notification.Action.Builder(
-                    android.R.drawable.ic_media_play,
-                    "Retomar",
-                    resumePending
-                ).build()
-            )
+            builder.addAction(0, "Retomar", resumePending)
         }
 
         if (current == RecState.RECORDING || current == RecState.PAUSED || current == RecState.STOPPING) {
-            builder.addAction(
-                Notification.Action.Builder(
-                    android.R.drawable.ic_menu_close_clear_cancel,
-                    "Parar",
-                    stopPending
-                ).build()
-            )
+            builder.addAction(0, "Parar", stopPending)
         }
 
         return builder.build()

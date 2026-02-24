@@ -8,6 +8,7 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.OrientationEventListener
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -28,6 +29,7 @@ class MainActivity : FlutterActivity() {
 
     private var pendingOptions: Map<String, Any>? = null
     private var pendingResult: MethodChannel.Result? = null
+    private var orientationListener: OrientationEventListener? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -46,6 +48,7 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "stopRecording" -> {
+                        stopOrientationMonitoring()
                         startService(Intent(this, ScreenRecordService::class.java).apply {
                             action = ScreenRecordService.ACTION_STOP
                         })
@@ -199,6 +202,35 @@ class MainActivity : FlutterActivity() {
         startActivityForResult(intent, REQ_MEDIA_PROJECTION)
     }
 
+    private fun startOrientationMonitoring() {
+        if (orientationListener == null) {
+            orientationListener = object : OrientationEventListener(this) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (orientation == OrientationEventListener.ORIENTATION_UNKNOWN) return
+                    
+                    // Detecta se é paisagem (entre 45-135 ou 225-315 graus)
+                    val isLandscape = (orientation >= 45 && orientation < 135) || 
+                                     (orientation >= 225 && orientation < 315)
+                    
+                    // Envia para o serviço quando a orientação muda
+                    if (ScreenRecordService.state == ScreenRecordService.RecState.RECORDING) {
+                        val intent = Intent(this@MainActivity, ScreenRecordService::class.java).apply {
+                            action = "ACTION_UPDATE_ORIENTATION"
+                            putExtra("EXTRA_IS_LANDSCAPE", isLandscape)
+                        }
+                        startService(intent)
+                    }
+                }
+            }
+            orientationListener?.enable()
+        }
+    }
+
+    private fun stopOrientationMonitoring() {
+        orientationListener?.disable()
+        orientationListener = null
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -225,13 +257,25 @@ class MainActivity : FlutterActivity() {
                 putExtra(ScreenRecordService.EXTRA_FPS, opts["fps"] as Int)
                 putExtra(ScreenRecordService.EXTRA_RECORD_MIC, opts["recordMic"] as Boolean)
                 
-                // ✅ CORREÇÃO: verifica se isLandscape existe e não é nulo
                 val isLandscape = opts["isLandscape"] as? Boolean ?: false
-                putExtra("EXTRA_IS_LANDSCAPE", isLandscape)
+                putExtra(ScreenRecordService.EXTRA_IS_LANDSCAPE, isLandscape)
             }
 
-            startForegroundService(intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            
+            // Inicia o monitoramento de orientação
+            startOrientationMonitoring()
+            
             res?.success(null)
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopOrientationMonitoring()
     }
 }
