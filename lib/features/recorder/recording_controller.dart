@@ -1,8 +1,10 @@
 import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // ADICIONAR no pubspec.yaml
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/platform/screen_recorder_channel.dart';
 import '../../core/platform/overlay_bubble_channel.dart';
@@ -12,57 +14,68 @@ enum RecordingState { idle, recording, paused, stopping }
 class RecordingController extends ChangeNotifier {
   RecordingController() {
     _eventSub = _eventChannel.receiveBroadcastStream().listen(
-      _onEvent,
+      (e) {
+        unawaited(_onEvent(e));
+      },
       onError: (e) => debugPrint('❌ EventChannel error: $e'),
     );
-    _loadOrientationMode(); // CARREGA O MODO SALVO
+
+    unawaited(_loadOrientationMode());
   }
 
+  // ---------- estado ----------
   RecordingState state = RecordingState.idle;
+
+  /// URI do último segmento em gravação (debug/fallback)
   String? lastUri;
+
+  /// ✅ URI FINAL (merge no Android) — esse é o que a UI deve usar
+  String? finalUri;
+
   Duration elapsed = Duration.zero;
   Timer? _timer;
-
-  // NOVO: modo de orientação selecionado
-  OrientationMode _orientationMode = OrientationMode.auto;
-  OrientationMode get orientationMode => _orientationMode;
 
   bool get isRecording => state == RecordingState.recording;
   bool get isPaused => state == RecordingState.paused;
 
-  static const EventChannel _eventChannel = EventChannel(
-    'screen_recorder_events',
-  );
+  // ---------- orientação ----------
+  OrientationMode _orientationMode = OrientationMode.auto;
+  OrientationMode get orientationMode => _orientationMode;
 
+  // ---------- canais ----------
+  static const EventChannel _eventChannel = EventChannel('screen_recorder_events');
   StreamSubscription? _eventSub;
 
-  // NOVO: carregar modo salvo
+  // ------------------ prefs ------------------
+
   Future<void> _loadOrientationMode() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedIndex = prefs.getInt('orientationMode') ?? 0;
-      _orientationMode = OrientationMode.values[savedIndex];
+      final idx = savedIndex.clamp(0, OrientationMode.values.length - 1);
+      _orientationMode = OrientationMode.values[idx];
       notifyListeners();
     } catch (e) {
-      debugPrint('Erro ao carregar modo de orientação: $e');
+      debugPrint('⚠️ Erro ao carregar modo de orientação: $e');
     }
   }
 
-  // NOVO: salvar e atualizar modo
   Future<void> setOrientationMode(OrientationMode mode) async {
     if (_orientationMode == mode) return;
-
     _orientationMode = mode;
+
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('orientationMode', mode.index);
     } catch (e) {
-      debugPrint('Erro ao salvar modo de orientação: $e');
+      debugPrint('⚠️ Erro ao salvar modo de orientação: $e');
     }
+
     notifyListeners();
   }
 
-  // NOVO: calcular dimensões baseado no modo selecionado
+  // ------------------ dimensões (para o START) ------------------
+
   Map<String, int> _getDimensionsForMode(BuildContext context) {
     final size = MediaQuery.of(context).size;
     final pixelRatio = MediaQuery.of(context).devicePixelRatio;
@@ -71,42 +84,46 @@ class RecordingController extends ChangeNotifier {
 
     switch (_orientationMode) {
       case OrientationMode.portrait:
-        // Força retrato: menor largura, maior altura
         return {
           'width': realW < realH ? realW : realH,
           'height': realW < realH ? realH : realW,
         };
 
       case OrientationMode.landscape:
-        // Força paisagem: maior largura, menor altura
         return {
           'width': realW > realH ? realW : realH,
           'height': realW > realH ? realH : realW,
         };
 
       case OrientationMode.square:
-        // Modo quadrado: 1080x1080 (ou o máximo possível)
-        final size = (realW < realH ? realW : realH).clamp(720, 1080);
-        return {'width': size, 'height': size};
+        final s = (realW < realH ? realW : realH).clamp(720, 1080);
+        return {'width': s, 'height': s};
 
       case OrientationMode.auto:
       default:
-        // Automático: usa orientação atual
         return {'width': realW, 'height': realH};
     }
   }
 
-  void _onEvent(dynamic e) {
+  // ------------------ EventChannel ------------------
+
+  Future<void> _onEvent(dynamic e) async {
     final map = Map<String, dynamic>.from(e as Map);
 
+    final type = (map['type'] as String?) ?? '';
     final s = (map['state'] as String?) ?? 'idle';
     final ms = (map['elapsed'] as int?) ?? 0;
 
+    // estado + timer
     if (s == 'recording') {
       state = RecordingState.recording;
       _startTimerFromNative(ms);
     } else if (s == 'paused') {
       state = RecordingState.paused;
+      _stopTimer();
+      elapsed = Duration(milliseconds: ms);
+    } else if (s == 'stopping') {
+      state = RecordingState.stopping;
       _stopTimer();
       elapsed = Duration(milliseconds: ms);
     } else {
@@ -115,16 +132,33 @@ class RecordingController extends ChangeNotifier {
       elapsed = Duration.zero;
     }
 
+    // URIs
     lastUri = map['lastUri'] as String?;
+
+    // ✅ finalUri vem no stop (merge Android)
+    final maybeFinal = map['finalUri'] as String?;
+    if (maybeFinal != null && maybeFinal.isNotEmpty) {
+      finalUri = maybeFinal;
+    }
+
     notifyListeners();
+
+    // no stop, se o Android não mandou finalUri (fallback), usa lastUri
+    if (type == 'stop') {
+      if ((finalUri == null || finalUri!.isEmpty) && (lastUri?.isNotEmpty ?? false)) {
+        finalUri = lastUri;
+        notifyListeners();
+      }
+    }
   }
+
+  // ------------------ sync fallback ------------------
 
   Future<void> syncFromNative() async {
     final st = await ScreenRecorderChannel.getStatus();
 
     final s = (st['state'] as String?) ?? 'idle';
     lastUri = st['lastUri'] as String?;
-
     final ms = (st['elapsed'] is int) ? (st['elapsed'] as int) : 0;
 
     if (s == 'recording') {
@@ -134,6 +168,10 @@ class RecordingController extends ChangeNotifier {
       state = RecordingState.paused;
       _stopTimer();
       elapsed = Duration(milliseconds: ms);
+    } else if (s == 'stopping') {
+      state = RecordingState.stopping;
+      _stopTimer();
+      elapsed = Duration(milliseconds: ms);
     } else {
       state = RecordingState.idle;
       _stopTimer();
@@ -143,27 +181,31 @@ class RecordingController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ------------------ permissões ------------------
+
   Future<void> _ensurePerms() async {
     final mic = await Permission.microphone.request();
     if (!mic.isGranted) throw Exception('Permissão do microfone negada.');
     await Permission.notification.request();
   }
 
+  // ------------------ actions ------------------
+
   Future<void> start(BuildContext context) async {
-    if (state == RecordingState.recording || state == RecordingState.paused) {
-      return;
-    }
+    if (state == RecordingState.recording || state == RecordingState.paused) return;
 
     await _ensurePerms();
 
-    // USA AS DIMENSÕES BASEADAS NO MODO SELECIONADO
+    // zera vídeo final anterior
+    finalUri = null;
+
     final dims = _getDimensionsForMode(context);
     final w = dims['width']!;
     final h = dims['height']!;
 
     final bitrate = (w * h >= 1920 * 1080) ? 12 * 1000 * 1000 : 8 * 1000 * 1000;
 
-    debugPrint('🎥 Iniciando gravação: Modo=${_orientationMode.name} ${w}x$h');
+    debugPrint('🎥 Start: mode=${_orientationMode.name} ${w}x$h');
 
     await ScreenRecorderChannel.start(
       width: w,
@@ -171,9 +213,10 @@ class RecordingController extends ChangeNotifier {
       bitrate: bitrate,
       fps: 30,
       recordMic: true,
-      orientationMode: _orientationMode, // PASSA O MODO SELECIONADO
+      orientationMode: _orientationMode,
     );
 
+    // mostra bolha se permitido
     try {
       final ok = await OverlayBubbleChannel.hasPermission();
       if (ok) await OverlayBubbleChannel.show();
@@ -219,8 +262,12 @@ class RecordingController extends ChangeNotifier {
       debugPrint('⚠️ Falha ao esconder bolha: $e');
     }
 
+    // o evento "stop" vai chegar com finalUri (merge Android).
+    // sync aqui é só fallback.
     await syncFromNative();
   }
+
+  // ------------------ timer local (UI suave) ------------------
 
   void _startTimer() {
     _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {

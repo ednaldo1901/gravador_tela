@@ -1,12 +1,6 @@
 import 'package:flutter/services.dart';
 
-// Enum para modos de orientação
-enum OrientationMode {
-  auto,      // Automático - detecta orientação atual
-  portrait,  // Força retrato
-  landscape, // Força paisagem
-  square,    // Quadrado (1080x1080)
-}
+enum OrientationMode { auto, portrait, landscape, square }
 
 class ScreenRecorderChannel {
   static const _channel = MethodChannel('screen_recorder');
@@ -17,7 +11,7 @@ class ScreenRecorderChannel {
     required int bitrate,
     required int fps,
     required bool recordMic,
-    required OrientationMode orientationMode, // NOVO PARÂMETRO
+    required OrientationMode orientationMode,
   }) async {
     await _channel.invokeMethod('startRecording', {
       'width': width,
@@ -25,24 +19,23 @@ class ScreenRecorderChannel {
       'bitrate': bitrate,
       'fps': fps,
       'recordMic': recordMic,
-      'orientationMode': orientationMode.index, // 0,1,2,3
+      'orientationMode': orientationMode.index,
     });
   }
 
-  static Future<void> stop() async {
-    await _channel.invokeMethod('stopRecording');
-  }
-
-  static Future<void> pause() async {
-    await _channel.invokeMethod('pauseRecording');
-  }
-
-  static Future<void> resume() async {
-    await _channel.invokeMethod('resumeRecording');
-  }
+  static Future<void> stop() => _channel.invokeMethod('stopRecording');
+  static Future<void> pause() => _channel.invokeMethod('pauseRecording');
+  static Future<void> resume() => _channel.invokeMethod('resumeRecording');
 
   static Future<Map<dynamic, dynamic>> getStatus() async {
     final res = await _channel.invokeMethod<Map<dynamic, dynamic>>('getStatus');
-    return res ?? {'state': 'idle', 'lastUri': null};
+    return res ??
+        {
+          'state': 'idle',
+          'lastUri': null,
+          'finalUri': null,
+          'elapsed': 0,
+          'segments': <String>[],
+        };
   }
 }
