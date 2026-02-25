@@ -82,6 +82,10 @@ class ScreenRecordService : Service() {
     private var segmentIndex = 0
     private var currentRotation = Surface.ROTATION_0
     private var lastRotationChangeAt = 0L
+    
+    // NOVO: Detecção de modo de jogo
+    private var isGameMode = false
+    private var forcedLandscapeForGame = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var displayManager: DisplayManager? = null
@@ -139,11 +143,13 @@ class ScreenRecordService : Service() {
         recordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
         orientationMode = intent.getIntExtra(EXTRA_ORIENTATION_MODE, 0)
 
-        // CORREÇÃO: Primeiro tornar o serviço foreground com o tipo correto
+        // Reset game detection
+        isGameMode = false
+        forcedLandscapeForGame = false
+
         state = RecState.RECORDING
         startForegroundServiceWithType()
 
-        // Depois obter a projeção de mídia
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpm.getMediaProjection(resultCode, dataIntent)
 
@@ -156,13 +162,58 @@ class ScreenRecordService : Service() {
         startTime = SystemClock.elapsedRealtime()
 
         currentRotation = getDefaultDisplayRotation()
+        
+        // Detectar se é um jogo no início
+        detectGameMode()
 
-        startNewSegmentForRotation(currentRotation, reason = "start")
+        startNewSegmentForRotation(currentRotation, reason = "start", isInitialSegment = true)
 
         if (orientationMode == 0) registerRotationListener() else unregisterRotationListener()
 
         sendEvent("start")
         notifyUpdateNotification()
+    }
+
+    // NOVO: Detectar se o app em primeiro plano é um jogo (CORRIGIDO)
+    private fun detectGameMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val runningTasks = activityManager.getRunningTasks(1)
+                if (runningTasks.isNotEmpty()) {
+                    val topActivity = runningTasks[0].topActivity
+                    val packageName = topActivity?.packageName
+                    
+                    // CORREÇÃO: Verificar se packageName não é nulo
+                    if (packageName != null) {
+                        val packageManager = packageManager
+                        val applicationInfo = packageManager.getApplicationInfo(packageName, 0)
+                        
+                        // Categorias que indicam jogo
+                        val isGame = applicationInfo.category == android.content.pm.ApplicationInfo.CATEGORY_GAME
+                        
+                        if (isGame) {
+                            Log.d("REC", "🎮 Modo jogo detectado: $packageName")
+                            isGameMode = true
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d("REC", "Erro ao detectar modo jogo: ${e.message}")
+            }
+        }
+    }
+
+    // NOVO: Verificar periodicamente se entrou em modo jogo
+    private fun checkForGameMode() {
+        if (isGameMode) return // Já detectado
+        
+        mainHandler.postDelayed({
+            if (state == RecState.RECORDING && !isGameMode) {
+                detectGameMode()
+                checkForGameMode()
+            }
+        }, 2000) // Verificar a cada 2 segundos
     }
 
     private fun startForegroundServiceWithType() {
@@ -190,21 +241,45 @@ class ScreenRecordService : Service() {
             override fun onDisplayRemoved(displayId: Int) {}
             override fun onDisplayChanged(displayId: Int) {
                 if (state != RecState.RECORDING) return
+                
+                // Debounce
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastRotationChangeAt < 800) return
                 lastRotationChangeAt = now
 
                 val rot = getDefaultDisplayRotation()
+                
+                // Se for modo jogo e estamos em landscape, não segmentar desnecessariamente
+                if (isGameMode) {
+                    val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
+                    
+                    if (isLandscape && !forcedLandscapeForGame) {
+                        // Primeira vez que entra em landscape no jogo - forçar segmento
+                        forcedLandscapeForGame = true
+                        currentRotation = rot
+                        Log.d("REC", "🎮 Jogo em paisagem - criando segmento especial")
+                        restartSegmentForRotation(rot, isGameForced = true)
+                    } else if (!isLandscape && forcedLandscapeForGame) {
+                        // Voltou para retrato no jogo (improvável, mas tratar)
+                        forcedLandscapeForGame = false
+                        currentRotation = rot
+                        restartSegmentForRotation(rot, isGameForced = true)
+                    }
+                    return
+                }
+                
+                // Comportamento normal para apps não-jogo
                 if (rot == currentRotation) return
                 currentRotation = rot
-
-                Log.d("REC", "🔄 Rotação mudou -> segmentar. rot=$rot")
-                restartSegmentForRotation(rot)
+                restartSegmentForRotation(rot, isGameForced = false)
             }
         }
 
         displayListener = listener
         displayManager?.registerDisplayListener(listener, mainHandler)
+        
+        // Iniciar verificação periódica de modo jogo
+        checkForGameMode()
     }
 
     private fun unregisterRotationListener() {
@@ -212,24 +287,36 @@ class ScreenRecordService : Service() {
         displayListener = null
     }
 
-    private fun restartSegmentForRotation(rot: Int) {
+    private fun restartSegmentForRotation(rot: Int, isGameForced: Boolean) {
         if (state != RecState.RECORDING) return
         stopCurrentRecorderOnly()
-        startNewSegmentForRotation(rot, reason = "rotate")
+        startNewSegmentForRotation(rot, if (isGameForced) "game_rotate" else "rotate", isInitialSegment = false)
     }
 
-    private fun startNewSegmentForRotation(rot: Int, reason: String) {
+    private fun startNewSegmentForRotation(rot: Int, reason: String, isInitialSegment: Boolean) {
         val (realW, realH, dpi) = getRealMetrics()
         val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
 
-        val (w, h) = when (orientationMode) {
-            1 -> Pair(min(realW, realH), max(realW, realH))
-            2 -> Pair(max(realW, realH), min(realW, realH))
-            3 -> {
+        val (w, h) = when {
+            // NOVO: Se for modo jogo e estamos forçando paisagem, usar resolução otimizada
+            isGameMode && isLandscape -> {
+                // Para jogos em paisagem, usar resolução widescreen padrão
+                val gameW = max(realW, realH)
+                val gameH = min(realW, realH)
+                Log.d("REC", "🎮 Dimensões otimizadas para jogo: ${gameW}x${gameH}")
+                Pair(gameW, gameH)
+            }
+            
+            // Modos normais
+            orientationMode == 1 -> // Portrait
+                Pair(min(realW, realH), max(realW, realH))
+            orientationMode == 2 -> // Landscape
+                Pair(max(realW, realH), min(realW, realH))
+            orientationMode == 3 -> { // Square
                 val s = min(realW, realH)
                 Pair(s, s)
             }
-            else -> {
+            else -> { // Auto
                 if (isLandscape) Pair(max(realW, realH), min(realW, realH))
                 else Pair(min(realW, realH), max(realW, realH))
             }
@@ -274,7 +361,12 @@ class ScreenRecordService : Service() {
         )
 
         recorder!!.start()
-        sendEvent("segment", mapOf("segmentIndex" to segmentIndex))
+        sendEvent("segment", mapOf(
+            "segmentIndex" to segmentIndex,
+            "isGameMode" to isGameMode,
+            "width" to w,
+            "height" to h
+        ))
         notifyUpdateNotification()
     }
 
@@ -520,10 +612,11 @@ class ScreenRecordService : Service() {
             Notification.Builder(this)
         }
 
+        val gameSuffix = if (isGameMode) " 🎮" else ""
         val text = when (current) {
-            RecState.RECORDING -> "Gravando... (Segmento $segmentIndex)"
-            RecState.PAUSED -> "Pausado"
-            RecState.STOPPING -> "Finalizando..."
+            RecState.RECORDING -> "Gravando... (Segmento $segmentIndex)$gameSuffix"
+            RecState.PAUSED -> "Pausado$gameSuffix"
+            RecState.STOPPING -> "Finalizando...$gameSuffix"
             RecState.IDLE -> "Pronto"
         }
 
@@ -566,7 +659,8 @@ class ScreenRecordService : Service() {
 
     private fun createMediaStoreOutput(part: Int): Pair<Uri, ParcelFileDescriptor> {
         val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val fileName = "record_${time}_p${part}.mp4"
+        val gameTag = if (isGameMode) "_game" else ""
+        val fileName = "record_${time}${gameTag}_p${part}.mp4"
 
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
