@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:gravador_tela/core/platform/overlay_bubble_channel.dart';
 import 'package:provider/provider.dart';
-import '../../core/platform/overlay_bubble_channel.dart';
+
 import '../recorder/recording_controller.dart';
 import 'orientation_selector.dart';
 
@@ -25,10 +26,10 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _checkBubbleStatus() async {
-    // Não temos como saber se a bolha está ativa diretamente
-    // então apenas verificamos permissão
     final hasPerm = await OverlayBubbleChannel.hasPermission();
-    setState(() => bubbleEnabled = hasPerm);
+    if (mounted) {
+      setState(() => bubbleEnabled = hasPerm);
+    }
   }
 
   @override
@@ -82,7 +83,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   final ok = await OverlayBubbleChannel.hasPermission();
                   if (!ok) {
                     await OverlayBubbleChannel.openSettings();
-                    // Verifica novamente após abrir configurações
                     final newOk = await OverlayBubbleChannel.hasPermission();
                     if (!newOk) return;
                   }
@@ -91,7 +91,9 @@ class _SettingsPageState extends State<SettingsPage> {
                   await OverlayBubbleChannel.hide();
                 }
 
-                setState(() => bubbleEnabled = v);
+                if (mounted) {
+                  setState(() => bubbleEnabled = v);
+                }
               },
             ),
           ),

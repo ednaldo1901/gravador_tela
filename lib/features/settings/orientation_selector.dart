@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../../core/platform/screen_recorder_channel.dart';
+import 'package:gravador_tela/core/platform/screen_recorder_channel.dart';
+
 
 class OrientationSelector extends StatelessWidget {
   final OrientationMode selectedMode;

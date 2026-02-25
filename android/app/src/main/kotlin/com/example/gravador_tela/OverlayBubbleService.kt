@@ -70,7 +70,7 @@ class OverlayBubbleService : Service() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
 
         // dimensões (dp)
-        winSize = dp(260)      // janela maior para conter menu em qualquer lado
+        winSize = dp(260)
         bubbleSize = dp(66)
         radius = dp(96)
         btnSize = dp(48)
@@ -91,13 +91,13 @@ class OverlayBubbleService : Service() {
     private fun show() {
         if (root != null) return
 
-        val type =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
 
-        // ✅ Janela grande o suficiente para desenhar menu dos 2 lados
         params = WindowManager.LayoutParams(
             winSize,
             winSize,
@@ -107,7 +107,6 @@ class OverlayBubbleService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            // posição inicial: considere que a bolha deve aparecer "bem"
             x = dp(18)
             y = dp(240)
         }
@@ -117,7 +116,6 @@ class OverlayBubbleService : Service() {
             clipToPadding = false
         }
 
-        // bolha nasce "encostada" (menu abrirá pro lado oposto conforme necessário)
         bubbleLeftInWindow = padding
 
         bubble = createBubble().also { root!!.addView(it) }
@@ -128,7 +126,6 @@ class OverlayBubbleService : Service() {
         setMenuVisible(false, animate = false)
 
         wm?.addView(root, params)
-
         clampWindowToBounds()
         handler.post(tick)
     }
@@ -148,8 +145,6 @@ class OverlayBubbleService : Service() {
         stopSelf()
     }
 
-    // ---------------- Bubble UI ----------------
-
     private fun createBubble(): FrameLayout {
         val container = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(bubbleSize, bubbleSize).apply {
@@ -161,21 +156,19 @@ class OverlayBubbleService : Service() {
         }
 
         val icon = ImageView(this).apply {
-            layoutParams =
-                FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply {
-                    topMargin = dp(12)
-                }
+            layoutParams = FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply {
+                topMargin = dp(12)
+            }
             setImageResource(android.R.drawable.presence_video_online)
         }
         iconView = icon
 
         val t = TextView(this).apply {
-            layoutParams =
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
-                ).apply { bottomMargin = dp(10) }
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+            ).apply { bottomMargin = dp(10) }
             text = "00:00"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 12f
@@ -207,17 +200,6 @@ class OverlayBubbleService : Service() {
         return container
     }
 
-    // ---------------- Menu (4 botões) ----------------
-
-    /**
-     * Mantém:
-     * - X (parar/fechar)
-     * - Ferramenta (abrir app)
-     *
-     * Adiciona:
-     * - Start (iniciar gravação)
-     * - Toggle pause/retomar
-     */
     private fun createRadialMenu(): List<View> {
         fun menuButton(iconRes: Int, contentDesc: String, onClick: () -> Unit): View {
             return FrameLayout(this).apply {
@@ -231,30 +213,26 @@ class OverlayBubbleService : Service() {
                 addView(ImageView(this@OverlayBubbleService).apply {
                     layoutParams = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
                     setImageResource(iconRes)
-                    this.contentDescription = contentDesc
+                    contentDescription = contentDesc
                 })
             }
         }
 
-        // Start (iniciar gravação fora do app -> abre app e dispara fluxo)
         val btnStart = menuButton(android.R.drawable.ic_media_play, "Iniciar gravação") {
             startFromBubble()
             setMenuVisible(false, animate = true)
         }.also { it.tag = "btnStart" }
 
-        // Toggle pause/retomar
         val btnToggle = menuButton(android.R.drawable.ic_media_pause, "Pausar/Retomar") {
             togglePauseResume()
             setMenuVisible(false, animate = true)
         }.also { it.tag = "btnToggle" }
 
-        // Stop + close (X)
         val btnStopClose = menuButton(android.R.drawable.ic_menu_close_clear_cancel, "Parar/Fechar") {
             stopFromBubble()
             setMenuVisible(false, animate = true)
         }.also { it.tag = "btnStop" }
 
-        // Open app (ferramenta)
         val btnOpenApp = menuButton(android.R.drawable.ic_menu_manage, "Abrir app") {
             openApp()
             setMenuVisible(false, animate = true)
@@ -264,26 +242,15 @@ class OverlayBubbleService : Service() {
     }
 
     private fun positionRadialMenuItems() {
-        // lado da tela onde a bolha está (ABSOLUTO na tela, não dentro da janela)
         val side = currentSideOnScreen()
         val openToRight = (side == Side.LEFT)
 
-        // ✅ reposiciona a bolha dentro da janela para sempre ter espaço pro menu
-        // - se menu abre pra direita: bolha fica mais à esquerda dentro da janela
-        // - se menu abre pra esquerda: bolha fica mais à direita dentro da janela
-        val desiredBubbleLeft =
-            if (openToRight) padding
-            else (winSize - padding - bubbleSize)
-
-        // mantém bolha na mesma coordenada absoluta na tela
+        val desiredBubbleLeft = if (openToRight) padding else (winSize - padding - bubbleSize)
         keepBubbleAbsoluteWhileChangingInternalLeft(desiredBubbleLeft)
 
-        // ângulos do arco com 4 botões
-        val angles =
-            if (openToRight) listOf(-60.0, -20.0, 20.0, 60.0)
-            else listOf(240.0, 200.0, 160.0, 120.0)
+        val angles = if (openToRight) listOf(-60.0, -20.0, 20.0, 60.0)
+                     else listOf(240.0, 200.0, 160.0, 120.0)
 
-        // centro da bolha dentro da janela
         val centerX = bubbleLeftInWindow + bubbleSize / 2
         val centerY = bubbleTopInWindow + bubbleSize / 2
 
@@ -319,8 +286,6 @@ class OverlayBubbleService : Service() {
         }
     }
 
-    // ---------------- Sync UI ----------------
-
     private fun updateUIFromService() {
         val st = ScreenRecordService.state
         val elapsedMs = ScreenRecordService.getElapsedForFlutter()
@@ -336,28 +301,21 @@ class OverlayBubbleService : Service() {
             else android.R.drawable.presence_video_online
         )
 
-        // Toggle icon
         val toggle = menuItems.firstOrNull { it.tag == "btnToggle" } as? FrameLayout
         val toggleIcon = toggle?.getChildAt(0) as? ImageView
         toggleIcon?.setImageResource(
             if (paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause
         )
 
-        // Start enabled só quando IDLE
         val startBtn = menuItems.firstOrNull { it.tag == "btnStart" }
         val idle = (st == ScreenRecordService.RecState.IDLE)
         startBtn?.alpha = if (idle) 1f else 0.45f
         startBtn?.isEnabled = idle
     }
 
-    // ---------------- Actions ----------------
-
     private fun startFromBubble() {
-        // Iniciar captura exige permissão MediaProjection.
-        // Abrimos o app e pedimos a permissão; o app inicia automaticamente.
         val i = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra(MainActivity.EXTRA_START_FROM_BUBBLE, true)
         }
         startActivity(i)
     }
@@ -389,8 +347,6 @@ class OverlayBubbleService : Service() {
         openIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (openIntent != null) startActivity(openIntent)
     }
-
-    // ---------------- Drag / Snap / Dock ----------------
 
     private inner class DragTouchListener : View.OnTouchListener {
         private var initialX = 0
@@ -479,8 +435,7 @@ class OverlayBubbleService : Service() {
         dockedSide = side
 
         val hidden = dp(22)
-        val targetBubbleAbsX =
-            if (side == Side.LEFT) (r.left - hidden) else (r.right - bubbleSize + hidden)
+        val targetBubbleAbsX = if (side == Side.LEFT) (r.left - hidden) else (r.right - bubbleSize + hidden)
 
         val startWinX = lp.x
         val targetWinX = targetBubbleAbsX - bubbleLeftInWindow
@@ -505,8 +460,7 @@ class OverlayBubbleService : Service() {
         val r = displayRect()
 
         docked = false
-        val targetBubbleAbsX =
-            if (dockedSide == Side.LEFT) r.left else (r.right - bubbleSize)
+        val targetBubbleAbsX = if (dockedSide == Side.LEFT) r.left else (r.right - bubbleSize)
 
         val startWinX = lp.x
         val targetWinX = targetBubbleAbsX - bubbleLeftInWindow
@@ -530,25 +484,20 @@ class OverlayBubbleService : Service() {
         val r = displayRect()
 
         docked = false
-        val targetBubbleAbsX =
-            if (dockedSide == Side.LEFT) r.left else (r.right - bubbleSize)
+        val targetBubbleAbsX = if (dockedSide == Side.LEFT) r.left else (r.right - bubbleSize)
 
         lp.x = targetBubbleAbsX - bubbleLeftInWindow
         clampWindowToBounds()
         wm?.updateViewLayout(root, lp)
     }
 
-    // ---------------- Helpers (posicionamento) ----------------
-
     private fun keepBubbleAbsoluteWhileChangingInternalLeft(newLeft: Int) {
         val lp = params ?: return
         val currentAbs = bubbleAbsoluteX()
         bubbleLeftInWindow = newLeft
 
-        // move janela para preservar posição absoluta da bolha
         lp.x = currentAbs - bubbleLeftInWindow
 
-        // aplica no layout da bolha
         (bubble?.layoutParams as? FrameLayout.LayoutParams)?.let {
             it.leftMargin = bubbleLeftInWindow
             it.topMargin = bubbleTopInWindow
@@ -574,7 +523,6 @@ class OverlayBubbleService : Service() {
         val lp = params ?: return
         val r = displayRect()
 
-        // vamos garantir que A BOLHA fique sempre visível no retângulo
         val bubbleAbsX = lp.x + bubbleLeftInWindow
         val bubbleAbsY = lp.y + bubbleTopInWindow
 
@@ -600,8 +548,6 @@ class OverlayBubbleService : Service() {
         val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
         return if (resId > 0) resources.getDimensionPixelSize(resId) else dp(24)
     }
-
-    // ---------------- Drawables / Utils ----------------
 
     private fun bubbleBg(isPaused: Boolean): GradientDrawable {
         return GradientDrawable().apply {

@@ -1,13 +1,13 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
+import 'package:gravador_tela/core/platform/overlay_bubble_channel.dart';
+import 'package:gravador_tela/core/platform/screen_recorder_channel.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../core/platform/screen_recorder_channel.dart';
-import '../../core/platform/overlay_bubble_channel.dart';
+
 
 enum RecordingState { idle, recording, paused, stopping }
 
@@ -135,7 +135,6 @@ class RecordingController extends ChangeNotifier {
     // URIs
     lastUri = map['lastUri'] as String?;
 
-    // ✅ finalUri vem no stop (merge Android)
     final maybeFinal = map['finalUri'] as String?;
     if (maybeFinal != null && maybeFinal.isNotEmpty) {
       finalUri = maybeFinal;

@@ -1,26 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ✅ PERMISSÕES NECESSÁRIAS -->
+    <!-- PERMISSÕES NECESSÁRIAS -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!-- Android 14+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-
-    <!-- Android 13+ (notificação) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-
-
-
-    <!-- Android 12- -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
@@ -28,16 +17,17 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         
-S
-        <!-- ✅ SERVICE DA GRAVAÇÃO -->
+        <!-- SERVICE DA GRAVAÇÃO - com tipos corretos para Android 14+ -->
         <service
             android:name=".ScreenRecordService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|microphone" />
-           <!-- Service da bolha -->  
-         <service
+           
+        <!-- Service da bolha -->
+        <service
             android:name=".OverlayBubbleService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <activity
             android:name=".MainActivity"
@@ -50,9 +40,8 @@ S
             android:windowSoftInputMode="adjustResize">
 
             <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

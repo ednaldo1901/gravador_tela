@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaRecorder
@@ -33,7 +34,6 @@ class ScreenRecordService : Service() {
     enum class RecState { IDLE, RECORDING, PAUSED, STOPPING }
 
     companion object {
-        const val EXTRA_START_FROM_BUBBLE = "EXTRA_START_FROM_BUBBLE"
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
         const val ACTION_PAUSE = "ACTION_PAUSE"
@@ -44,7 +44,7 @@ class ScreenRecordService : Service() {
         const val EXTRA_BITRATE = "EXTRA_BITRATE"
         const val EXTRA_FPS = "EXTRA_FPS"
         const val EXTRA_RECORD_MIC = "EXTRA_RECORD_MIC"
-        const val EXTRA_ORIENTATION_MODE = "EXTRA_ORIENTATION_MODE" // 0 auto, 1 portrait, 2 landscape, 3 square
+        const val EXTRA_ORIENTATION_MODE = "EXTRA_ORIENTATION_MODE"
 
         private const val NOTIF_CHANNEL_ID = "screen_record_channel"
         private const val NOTIF_ID = 101
@@ -122,11 +122,11 @@ class ScreenRecordService : Service() {
         if (state == RecState.RECORDING || state == RecState.PAUSED) return
 
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
-        val dataIntent: Intent? =
-            if (Build.VERSION.SDK_INT >= 33)
-                intent.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
-            else
-                @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_DATA_INTENT)
+        val dataIntent: Intent? = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_DATA_INTENT)
+        }
 
         if (dataIntent == null || resultCode != Activity.RESULT_OK) {
             Log.d("REC", "❌ Sem permissão MediaProjection.")
@@ -139,6 +139,11 @@ class ScreenRecordService : Service() {
         recordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
         orientationMode = intent.getIntExtra(EXTRA_ORIENTATION_MODE, 0)
 
+        // CORREÇÃO: Primeiro tornar o serviço foreground com o tipo correto
+        state = RecState.RECORDING
+        startForegroundServiceWithType()
+
+        // Depois obter a projeção de mídia
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpm.getMediaProjection(resultCode, dataIntent)
 
@@ -149,11 +154,8 @@ class ScreenRecordService : Service() {
 
         pauseOffset = 0L
         startTime = SystemClock.elapsedRealtime()
-        state = RecState.RECORDING
 
         currentRotation = getDefaultDisplayRotation()
-
-        startForeground(NOTIF_ID, buildNotification(state))
 
         startNewSegmentForRotation(currentRotation, reason = "start")
 
@@ -163,7 +165,22 @@ class ScreenRecordService : Service() {
         notifyUpdateNotification()
     }
 
-    // ------------------------ ROTATION => SEGMENTS ------------------------
+    private fun startForegroundServiceWithType() {
+        val notification = buildNotification(state)
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val foregroundServiceType = if (recordMic) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or 
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            
+            startForeground(NOTIF_ID, notification, foregroundServiceType)
+        } else {
+            startForeground(NOTIF_ID, notification)
+        }
+    }
 
     private fun registerRotationListener() {
         if (displayListener != null) return
@@ -354,8 +371,6 @@ class ScreenRecordService : Service() {
         super.onDestroy()
     }
 
-    // ------------------------ MERGE ------------------------
-
     private fun mergeSegmentsCopyFirstFallback(): Uri? {
         val seg = segmentUris.toList()
         if (seg.isEmpty()) return null
@@ -393,11 +408,10 @@ class ScreenRecordService : Service() {
 
         var mergedOk = ReturnCode.isSuccess(s1.returnCode)
         if (!mergedOk) {
-            val cmdReencode =
-                "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
-                        "-c:v libx264 -preset veryfast -crf 18 " +
-                        "-c:a aac -b:a 192k " +
-                        "${outTmp.absolutePath}"
+            val cmdReencode = "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
+                    "-c:v libx264 -preset veryfast -crf 18 " +
+                    "-c:a aac -b:a 192k " +
+                    "${outTmp.absolutePath}"
 
             val s2 = FFmpegKit.execute(cmdReencode)
             mergedOk = ReturnCode.isSuccess(s2.returnCode)
@@ -422,7 +436,6 @@ class ScreenRecordService : Service() {
                 contentResolver.update(finalUri, values, null, null)
             }
 
-            // apaga segmentos
             seg.forEach { uriStr ->
                 try { contentResolver.delete(Uri.parse(uriStr), null, null) } catch (_: Exception) {}
             }
@@ -469,8 +482,6 @@ class ScreenRecordService : Service() {
         }
     }
 
-    // ------------------------ NOTIFICATION ------------------------
-
     private fun notifyUpdateNotification() {
         try {
             getSystemService(NotificationManager::class.java)
@@ -503,10 +514,11 @@ class ScreenRecordService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
-        val builder =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                Notification.Builder(this, NOTIF_CHANNEL_ID)
-            else Notification.Builder(this)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, NOTIF_CHANNEL_ID)
+        } else {
+            Notification.Builder(this)
+        }
 
         val text = when (current) {
             RecState.RECORDING -> "Gravando... (Segmento $segmentIndex)"
@@ -552,8 +564,6 @@ class ScreenRecordService : Service() {
         }
     }
 
-    // ------------------------ MEDIASTORE SEGMENTS ------------------------
-
     private fun createMediaStoreOutput(part: Int): Pair<Uri, ParcelFileDescriptor> {
         val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val fileName = "record_${time}_p${part}.mp4"
@@ -575,8 +585,6 @@ class ScreenRecordService : Service() {
 
         return Pair(uri, pfd)
     }
-
-    // ------------------------ DISPLAY HELPERS ------------------------
 
     private fun getDefaultDisplayRotation(): Int {
         val dm = displayManager ?: return Surface.ROTATION_0

@@ -24,11 +24,11 @@ class _AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
 
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       final rec = context.read<RecordingController>();
       rec.addListener(_onRecordingChanged);
 
-      await rec.syncFromNative();
+      rec.syncFromNative();
       _onRecordingChanged();
     });
   }
@@ -85,7 +85,6 @@ class _AppShellState extends State<AppShell> {
           onTabChange: (i) async {
             setState(() => index = i);
 
-            // ✅ FORÇA refresh quando entrar na Galeria
             if (i == 1) {
               await context.read<GalleryController>().refresh();
             }

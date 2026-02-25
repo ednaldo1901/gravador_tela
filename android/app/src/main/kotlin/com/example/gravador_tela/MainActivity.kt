@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -15,8 +16,13 @@ class MainActivity : FlutterActivity() {
     private val CHANNEL = "screen_recorder"
     private val EVENTS = "screen_recorder_events"
     private val REQ_MEDIA_PROJ = 7001
+    private val REQ_OVERLAY_PERM = 7002
 
     private var pendingStartArgs: Map<String, Any>? = null
+
+    companion object {
+        const val EXTRA_START_FROM_BUBBLE = "EXTRA_START_FROM_BUBBLE"
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -74,6 +80,36 @@ class MainActivity : FlutterActivity() {
                         result.success(map)
                     }
 
+                    "hasOverlayPermission" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            result.success(Settings.canDrawOverlays(this@MainActivity))
+                        } else {
+                            result.success(true)
+                        }
+                    }
+
+                    "openOverlaySettings" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                            startActivityForResult(intent, REQ_OVERLAY_PERM)
+                        }
+                        result.success(null)
+                    }
+
+                    "showBubble" -> {
+                        startService(Intent(this, OverlayBubbleService::class.java).apply {
+                            action = OverlayBubbleService.ACTION_SHOW
+                        })
+                        result.success(null)
+                    }
+
+                    "hideBubble" -> {
+                        startService(Intent(this, OverlayBubbleService::class.java).apply {
+                            action = OverlayBubbleService.ACTION_HIDE
+                        })
+                        result.success(null)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -87,8 +123,15 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (requestCode != REQ_MEDIA_PROJ) return
+        when (requestCode) {
+            REQ_MEDIA_PROJ -> handleMediaProjectionResult(resultCode, data)
+            REQ_OVERLAY_PERM -> {
+                // Nada a fazer, apenas retornar
+            }
+        }
+    }
 
+    private fun handleMediaProjectionResult(resultCode: Int, data: Intent?) {
         val args = pendingStartArgs ?: return
         pendingStartArgs = null
 
