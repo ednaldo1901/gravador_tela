@@ -26,7 +26,8 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 
@@ -54,8 +55,6 @@ class ScreenRecordService : Service() {
         @Volatile var lastOutputUriString: String? = null
         @Volatile var finalOutputUriString: String? = null
         @Volatile var segmentUris: MutableList<String> = mutableListOf()
-        
-        // Metadados dos segmentos
         @Volatile var segmentMetadata: MutableList<SegmentMetadata> = mutableListOf()
         @Volatile var eventSink: EventChannel.EventSink? = null
 
@@ -71,7 +70,6 @@ class ScreenRecordService : Service() {
         }
     }
 
-    // Metadados dos segmentos
     data class SegmentMetadata(
         val index: Int,
         val width: Int,
@@ -98,18 +96,27 @@ class ScreenRecordService : Service() {
     private var currentRotation = Surface.ROTATION_0
     private var lastRotationChangeAt = 0L
     
-    // Detecção de modo de jogo - AGORA MAIS ROBUSTA
-    private var isGameMode = false
-    private var forcedLandscapeForGame = false
-    private var gamePackageName: String? = null
+    // Detecção de modo de jogo
+    @Volatile private var isGameMode = false
+    @Volatile private var gamePackageName: String? = null
+    @Volatile private var gameDetected = false
     
-    // Resolução alvo para merge (prioriza jogo)
-    private var targetWidth = 0
-    private var targetHeight = 0
-    private var hasGameSegment = false
-    private var gameSegmentIndex = -1
+    // Resolução alvo para conversão retrato -> paisagem
+    private var targetLandscapeWidth = 0
+    private var targetLandscapeHeight = 0
+    private var hasPortraitSegments = false
+    private var portraitSegmentsCount = 0
+    private var gameLandscapeResolution = ""
 
-    // Cache de pacotes de jogos conhecidos (fallback)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var displayManager: DisplayManager? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
+    
+    // NOVO: Scheduler para detecção periódica
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
+    private var lastDetectedPackage: String? = null
+
+    // Lista de pacotes de jogos conhecidos
     private val knownGamePackages = setOf(
         "com.tencent.ig", // PUBG Mobile
         "com.activision.callofduty.shooter", // COD Mobile
@@ -123,13 +130,17 @@ class ScreenRecordService : Service() {
         "com.nianticlabs.pokemongo", // Pokemon GO
         "com.mojang.minecraftpe", // Minecraft
         "com.gameloft.android.ANMP.GloftA8HM", // Asphalt 8
-        "com.ea.gp.needforspeed" // Need for Speed
+        "com.gameloft.android.ANMP.GloftA9HM", // 🎮 Legacy of Discord
+        "com.gameloft.android.ANMP.GloftA9HM.Global", // Legacy of Discord Global
+        "com.ea.gp.needforspeed", // Need for Speed
+        "com.kiloo.subwaysurf", // Subway Surfers
+        "com.dts.freefiremax", // Free Fire Max
+        "com.roblox.client", // Roblox
+        "com.innersloth.spacemafia", // Among Us
+        "com.playkids.game", // PlayKids
+        "com.outfit7.mytalkingtomfree", // My Talking Tom
+        "com.gtarcade.lod"
     )
-
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var displayManager: DisplayManager? = null
-    private var displayListener: DisplayManager.DisplayListener? = null
-    private var gameDetectionRunnable: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -157,8 +168,9 @@ class ScreenRecordService : Service() {
             "finalUri" to finalOutputUriString,
             "elapsed" to getElapsedForFlutter(),
             "segments" to segmentUris.toList(),
-            "hasGameSegment" to hasGameSegment,
-            "gameSegmentIndex" to gameSegmentIndex
+            "isGameMode" to isGameMode,
+            "gameDetected" to gameDetected,
+            "gamePackage" to gamePackageName
         )
         map.putAll(extra)
         try { eventSink?.success(map) } catch (_: Exception) {}
@@ -185,7 +197,7 @@ class ScreenRecordService : Service() {
         recordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
         orientationMode = intent.getIntExtra(EXTRA_ORIENTATION_MODE, 0)
 
-        // Reset completo
+        // Reset
         resetGameDetection()
 
         state = RecState.RECORDING
@@ -199,18 +211,26 @@ class ScreenRecordService : Service() {
         segmentMetadata.clear()
         lastOutputUriString = null
         finalOutputUriString = null
+        hasPortraitSegments = false
+        portraitSegmentsCount = 0
 
         pauseOffset = 0L
         startTime = SystemClock.elapsedRealtime()
 
         currentRotation = getDefaultDisplayRotation()
         
-        // Detectar se é um jogo no início com verificação reforçada
-        detectGameModeEnhanced()
+        // Detectar modo jogo
+        detectGameMode()
 
         startNewSegmentForRotation(currentRotation, reason = "start")
 
-        if (orientationMode == 0) registerRotationListener() else unregisterRotationListener()
+        if (orientationMode == 0) {
+            registerRotationListener()
+            // NOVO: Iniciar detecção periódica
+            startPeriodicGameDetection()
+        } else {
+            unregisterRotationListener()
+        }
 
         sendEvent("start")
         notifyUpdateNotification()
@@ -218,20 +238,45 @@ class ScreenRecordService : Service() {
 
     private fun resetGameDetection() {
         isGameMode = false
-        forcedLandscapeForGame = false
+        gameDetected = false
         gamePackageName = null
-        hasGameSegment = false
-        gameSegmentIndex = -1
-        targetWidth = 0
-        targetHeight = 0
-        
-        // Cancelar qualquer detecção pendente
-        gameDetectionRunnable?.let { mainHandler.removeCallbacks(it) }
-        gameDetectionRunnable = null
+        targetLandscapeWidth = 0
+        targetLandscapeHeight = 0
+        gameLandscapeResolution = ""
+        lastDetectedPackage = null
     }
 
-    // Detecção aprimorada de modo jogo
-    private fun detectGameModeEnhanced() {
+    // NOVO: Detecção periódica a cada 2 segundos
+    private fun startPeriodicGameDetection() {
+        scheduler.scheduleAtFixedRate({
+            if (state == RecState.RECORDING) {
+                val currentPackage = getForegroundPackage()
+                if (currentPackage != null && currentPackage != lastDetectedPackage) {
+                    Log.d("REC", "🔄 Pacote em primeiro plano mudou: $lastDetectedPackage -> $currentPackage")
+                    lastDetectedPackage = currentPackage
+                    detectGameMode()
+                }
+            }
+        }, 2, 2, TimeUnit.SECONDS)
+    }
+
+    // NOVO: Obter pacote em primeiro plano
+    private fun getForegroundPackage(): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val runningTasks = activityManager.getRunningTasks(1)
+                if (runningTasks.isNotEmpty()) {
+                    return runningTasks[0].topActivity?.packageName
+                }
+            } catch (e: Exception) {
+                Log.d("REC", "Erro ao obter pacote em primeiro plano: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun detectGameMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
@@ -242,51 +287,57 @@ class ScreenRecordService : Service() {
                     val packageName = topActivity?.packageName
                     
                     if (packageName != null) {
-                        var isGame = false
-                        var gameDetectedBy = ""
+                        Log.d("REC", "🔍 Verificando pacote em primeiro plano: $packageName")
                         
-                        // Método 1: Verificar categoria oficial do Android
+                        var detected = false
+                        var detectionMethod = ""
+                        
+                        // Método 1: Categoria oficial do Android
                         try {
-                            val packageManager = packageManager
                             val applicationInfo = packageManager.getApplicationInfo(packageName, 0)
-                            isGame = applicationInfo.category == android.content.pm.ApplicationInfo.CATEGORY_GAME
-                            if (isGame) gameDetectedBy = "official_category"
+                            val isGameCategory = applicationInfo.category == android.content.pm.ApplicationInfo.CATEGORY_GAME
+                            Log.d("REC", "   Categoria oficial: $isGameCategory")
+                            if (isGameCategory) {
+                                detected = true
+                                detectionMethod = "official_category"
+                            }
                         } catch (e: Exception) {
-                            Log.d("REC", "Erro ao verificar categoria oficial: ${e.message}")
+                            Log.d("REC", "   Erro ao verificar categoria: ${e.message}")
                         }
                         
-                        // Método 2: Verificar lista de jogos conhecidos
-                        if (!isGame && knownGamePackages.any { packageName.contains(it) }) {
-                            isGame = true
-                            gameDetectedBy = "known_packages_list"
-                        }
-                        
-                        // Método 3: Verificar se usa OpenGL ES (comum em jogos)
-                        if (!isGame) {
-                            try {
-                                val packageManager = packageManager
-                                val packageInfo = packageManager.getPackageInfo(packageName, 0)
-                                // Jogos geralmente declaram features OpenGL
-                                if (packageInfo.reqFeatures?.any { it.name.contains("gl", ignoreCase = true) } == true) {
-                                    isGame = true
-                                    gameDetectedBy = "opengl_feature"
-                                }
-                            } catch (e: Exception) {
-                                // Ignorar
+                        // Método 2: Lista de jogos conhecidos
+                        if (!detected) {
+                            val matchedPackage = knownGamePackages.find { packageName.contains(it) }
+                            if (matchedPackage != null) {
+                                Log.d("REC", "   Match na lista conhecida: $matchedPackage")
+                                detected = true
+                                detectionMethod = "known_packages_list"
+                            } else {
+                                Log.d("REC", "   Sem match na lista conhecida")
                             }
                         }
                         
-                        if (isGame) {
-                            Log.d("REC", "🎮 Modo jogo detectado! Pacote: $packageName (detectado por: $gameDetectedBy)")
+                        // Se detectou um jogo e antes não estava em modo game
+                        if (detected && !isGameMode) {
+                            Log.d("REC", "🎮 MODO GAME DETECTADO! Pacote: $packageName (método: $detectionMethod)")
                             isGameMode = true
+                            gameDetected = true
                             gamePackageName = packageName
                             
-                            // Notificar Flutter sobre detecção de jogo
                             sendEvent("game_detected", mapOf(
                                 "packageName" to packageName,
-                                "detectionMethod" to gameDetectedBy
+                                "detectionMethod" to detectionMethod
                             ))
-                        } else {
+                        } 
+                        // Se não detectou jogo mas estava em modo game (saiu do jogo)
+                        else if (!detected && isGameMode) {
+                            Log.d("REC", "📱 Saindo do modo game (voltou para app normal: $packageName)")
+                            isGameMode = false
+                            gameDetected = false
+                            // Não resetamos a resolução alvo porque já pode ter segmentos de jogo
+                        }
+                        // App normal (sem mudança)
+                        else if (!detected && !isGameMode) {
                             Log.d("REC", "📱 App normal: $packageName")
                         }
                     }
@@ -295,22 +346,6 @@ class ScreenRecordService : Service() {
                 Log.d("REC", "Erro ao detectar modo jogo: ${e.message}")
             }
         }
-    }
-
-    // Verificação periódica mais eficiente
-    private fun startPeriodicGameDetection() {
-        gameDetectionRunnable = object : Runnable {
-            override fun run() {
-                if (state == RecState.RECORDING && !isGameMode) {
-                    detectGameModeEnhanced()
-                    // Se ainda não detectou, verifica novamente em 3 segundos
-                    if (!isGameMode) {
-                        mainHandler.postDelayed(this, 3000)
-                    }
-                }
-            }
-        }
-        gameDetectionRunnable?.let { mainHandler.postDelayed(it, 2000) }
     }
 
     private fun startForegroundServiceWithType() {
@@ -345,49 +380,29 @@ class ScreenRecordService : Service() {
 
                 val rot = getDefaultDisplayRotation()
                 
-                if (isGameMode) {
-                    val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
-                    
-                    if (isLandscape && !forcedLandscapeForGame) {
-                        // Primeira vez que entra em landscape no jogo
-                        forcedLandscapeForGame = true
-                        currentRotation = rot
-                        Log.d("REC", "🎮 Jogo em paisagem - criando segmento especial")
-                        restartSegmentForRotation(rot, isGameForced = true)
-                    } else if (!isLandscape && forcedLandscapeForGame) {
-                        // Voltou para retrato no jogo
-                        forcedLandscapeForGame = false
-                        currentRotation = rot
-                        restartSegmentForRotation(rot, isGameForced = true)
-                    }
-                    return
-                }
-                
-                // Comportamento normal para apps não-jogo
                 if (rot == currentRotation) return
+                
+                val oldRotation = currentRotation
                 currentRotation = rot
-                restartSegmentForRotation(rot, isGameForced = false)
+                
+                Log.d("REC", "🔄 Rotação mudou: $oldRotation -> $rot")
+                restartSegmentForRotation(rot)
             }
         }
 
         displayListener = listener
         displayManager?.registerDisplayListener(listener, mainHandler)
-        
-        // Iniciar verificação periódica de modo jogo
-        startPeriodicGameDetection()
     }
 
     private fun unregisterRotationListener() {
         displayListener?.let { displayManager?.unregisterDisplayListener(it) }
         displayListener = null
-        gameDetectionRunnable?.let { mainHandler.removeCallbacks(it) }
-        gameDetectionRunnable = null
     }
 
-    private fun restartSegmentForRotation(rot: Int, isGameForced: Boolean) {
+    private fun restartSegmentForRotation(rot: Int) {
         if (state != RecState.RECORDING) return
         stopCurrentRecorderOnly()
-        startNewSegmentForRotation(rot, if (isGameForced) "game_rotate" else "rotate")
+        startNewSegmentForRotation(rot, reason = "rotate")
     }
 
     private fun startNewSegmentForRotation(rot: Int, reason: String) {
@@ -395,29 +410,30 @@ class ScreenRecordService : Service() {
         val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
 
         val (w, h) = when {
-            // Prioridade máxima para modo jogo em paisagem
+            // MODO GAME DETECTADO
             isGameMode && isLandscape -> {
                 val gameW = max(realW, realH)
                 val gameH = min(realW, realH)
+                
                 Log.d("REC", "🎮 SEGMENTO DE JOGO EM PAISAGEM: ${gameW}x${gameH}")
                 
-                // Define resolução alvo baseada no jogo (APENAS quando é realmente jogo)
-                if (!hasGameSegment) {
-                    targetWidth = gameW
-                    targetHeight = gameH
-                    hasGameSegment = true
-                    gameSegmentIndex = segmentIndex + 1
-                    Log.d("REC", "🎯 RESOLUÇÃO ALVO DEFINIDA PELO JOGO: ${targetWidth}x${targetHeight} no segmento ${gameSegmentIndex}")
-                    
-                    // Notificar Flutter
-                    sendEvent("game_segment_created", mapOf(
-                        "segmentIndex" to (segmentIndex + 1),
-                        "width" to gameW,
-                        "height" to gameH
-                    ))
+                // Salvar resolução do jogo para conversão futura
+                if (targetLandscapeWidth == 0) {
+                    targetLandscapeWidth = gameW
+                    targetLandscapeHeight = gameH
+                    gameLandscapeResolution = "${gameW}x${gameH}"
+                    Log.d("REC", "🎯 RESOLUÇÃO ALVO DEFINIDA PELO JOGO: ${gameW}x${gameH}")
                 }
                 
                 Pair(gameW, gameH)
+            }
+            
+            // Modo game mas ainda em retrato (início do jogo ou app em retrato)
+            isGameMode && !isLandscape -> {
+                Log.d("REC", "🎮 Segmento GAME RETRATO (aguardando paisagem): ${realW}x${realH}")
+                hasPortraitSegments = true
+                portraitSegmentsCount++
+                Pair(realW, realH)
             }
             
             // Modos normais
@@ -441,18 +457,18 @@ class ScreenRecordService : Service() {
         outputPfd = pfd
         lastOutputUriString = uri.toString()
 
-        // Salvar metadados do segmento com informação de jogo
         val metadata = SegmentMetadata(
             index = segmentIndex,
             width = w,
             height = h,
-            isGameMode = isGameMode && isLandscape, // Só marca como jogo se for paisagem
+            isGameMode = isGameMode && isLandscape,
             rotation = rot,
             uri = uri.toString()
         )
         segmentMetadata.add(metadata)
 
-        Log.d("REC", "🎞️ Segmento #$segmentIndex | razão=$reason | ${w}x${h} | jogo=${metadata.isGameMode} | uri=$uri")
+        val gameInfo = if (isGameMode && isLandscape) " 🎮 JOGO" else if (isGameMode) " 🎮 (retrato)" else ""
+        Log.d("REC", "🎞️ Segmento #$segmentIndex | ${w}x${h} | rot=$rot$gameInfo")
 
         recorder = MediaRecorder().apply {
             if (recordMic) setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
@@ -487,10 +503,9 @@ class ScreenRecordService : Service() {
         recorder!!.start()
         sendEvent("segment", mapOf(
             "segmentIndex" to segmentIndex,
-            "isGameMode" to (isGameMode && isLandscape),
             "width" to w,
             "height" to h,
-            "isGameSegment" to (hasGameSegment && segmentIndex == gameSegmentIndex)
+            "isGameMode" to (isGameMode && isLandscape)
         ))
         notifyUpdateNotification()
     }
@@ -561,12 +576,20 @@ class ScreenRecordService : Service() {
         if (state == RecState.IDLE) return
 
         unregisterRotationListener()
+        scheduler.shutdown() // Para a detecção periódica
+
+        Log.d("REC", "🛑 Finalizando gravação...")
+        Log.d("REC", "   Modo game: $isGameMode")
+        Log.d("REC", "   Pacote: $gamePackageName")
+        Log.d("REC", "   Tem segmentos retrato: $hasPortraitSegments")
+        Log.d("REC", "   Resolução alvo: ${targetLandscapeWidth}x${targetLandscapeHeight}")
 
         state = RecState.STOPPING
         sendEvent("stopping", mapOf(
-            "hasGameSegment" to hasGameSegment,
-            "gameSegmentIndex" to gameSegmentIndex,
-            "targetResolution" to "$targetWidth x $targetHeight"
+            "isGameMode" to isGameMode,
+            "hasPortraitSegments" to hasPortraitSegments,
+            "portraitSegmentsCount" to portraitSegmentsCount,
+            "targetLandscape" to gameLandscapeResolution
         ))
         notifyUpdateNotification()
 
@@ -576,12 +599,12 @@ class ScreenRecordService : Service() {
         mediaProjection = null
 
         Thread {
-            val finalUri = if (hasGameSegment && targetWidth > 0 && targetHeight > 0) {
-                Log.d("REC", "🎯 Usando merge com prioridade de jogo (segmento $gameSegmentIndex)")
-                mergeSegmentsWithGamePriority()
+            val finalUri = if (isGameMode && targetLandscapeWidth > 0 && hasPortraitSegments) {
+                Log.d("REC", "🔄 Usando conversão retrato -> paisagem para modo game")
+                convertPortraitToLandscapeAndMerge()
             } else {
-                Log.d("REC", "📱 Usando merge normal (sem segmento de jogo)")
-                mergeSegmentsCopyFirstFallback()
+                Log.d("REC", "📱 Usando merge normal")
+                mergeSegmentsNormal()
             }
             
             finalOutputUriString = finalUri?.toString()
@@ -590,7 +613,7 @@ class ScreenRecordService : Service() {
             state = RecState.IDLE
             sendEvent("stop", mapOf(
                 "finalUri" to finalOutputUriString,
-                "usedGamePriority" to (hasGameSegment && targetWidth > 0)
+                "conversionApplied" to (isGameMode && targetLandscapeWidth > 0 && hasPortraitSegments)
             ))
             stopForeground(true)
             stopSelf()
@@ -599,122 +622,130 @@ class ScreenRecordService : Service() {
 
     override fun onDestroy() {
         unregisterRotationListener()
-        resetGameDetection()
+        scheduler.shutdownNow()
         super.onDestroy()
     }
 
-    // Merge priorizando resolução do jogo (APENAS quando realmente há jogo)
-    private fun mergeSegmentsWithGamePriority(): Uri? {
+    private fun convertPortraitToLandscapeAndMerge(): Uri? {
         val seg = segmentUris.toList()
         if (seg.isEmpty()) return null
         if (seg.size == 1) return Uri.parse(seg.first())
 
-        Log.d("REC", "🎯 INICIANDO MERGE PRIORITÁRIO PARA JOGO")
-        Log.d("REC", "🎯 Resolução alvo: ${targetWidth}x${targetHeight}")
-        Log.d("REC", "🎯 Segmento de jogo: #$gameSegmentIndex")
-        Log.d("REC", "🎯 Total de segmentos: ${seg.size}")
+        Log.d("REC", "🔄 INICIANDO CONVERSÃO RETRATO -> PAISAGEM PARA MODO GAME")
+        Log.d("REC", "🎯 Resolução alvo paisagem: ${targetLandscapeWidth}x${targetLandscapeHeight}")
+        Log.d("REC", "📊 Total segmentos: ${seg.size}, Segmentos retrato: $portraitSegmentsCount")
 
-        val workDir = File(cacheDir, "ffmerge_game")
+        val workDir = File(cacheDir, "ffmerge_game_convert")
         if (!workDir.exists()) workDir.mkdirs()
 
-        val segFiles = mutableListOf<File>()
+        val convertedFiles = mutableListOf<File>()
+        
         try {
             seg.forEachIndexed { idx, uriStr ->
-                val u = Uri.parse(uriStr)
-                val f = File(workDir, "seg_${idx + 1}.mp4")
-                copyUriToFile(contentResolver, u, f)
-                segFiles.add(f)
+                val inputFile = File(workDir, "input_${idx + 1}.mp4")
+                copyUriToFile(contentResolver, Uri.parse(uriStr), inputFile)
                 
-                // Log do segmento
                 val metadata = segmentMetadata.find { it.uri == uriStr }
-                Log.d("REC", "  Segmento ${idx + 1}: ${metadata?.width}x${metadata?.height} jogo=${metadata?.isGameMode}")
-            }
-        } catch (e: Exception) {
-            Log.d("REC", "❌ Erro ao copiar segmentos: ${e.message}")
-            cleanup(workDir, segFiles, null, null)
-            return Uri.parse(seg.last())
-        }
-
-        val listFile = File(workDir, "list.txt")
-        listFile.writeText(buildString {
-            segFiles.forEach { f ->
-                append("file '")
-                append(f.absolutePath.replace("'", "'\\''"))
-                append("'\n")
-            }
-        })
-
-        val outTmp = File(workDir, "merged_${System.currentTimeMillis()}.mp4")
-
-        // Construir filtro complexo para escala uniforme
-        val complexFilter = StringBuilder()
-        
-        // Aplica scale+pad para cada segmento usando a resolução alvo
-        for (i in 0 until segFiles.size) {
-            complexFilter.append("[$i:v]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1[v$i];")
-        }
-        
-        // Concatena todos os segmentos processados
-        val videoInputs = (0 until segFiles.size).joinToString("") { "[v$it]" }
-        complexFilter.append("${videoInputs}concat=n=${segFiles.size}:v=1:a=1[v][a]")
-
-        val cmdReencode = "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
-                "-filter_complex \"${complexFilter.toString()}\" " +
-                "-map \"[v]\" -map \"[a]\" " +
-                "-c:v libx264 -preset veryfast -crf 18 " +
-                "-c:a aac -b:a 192k " +
-                "${outTmp.absolutePath}"
-
-        Log.d("REC", "Executando FFmpeg com prioridade para jogo...")
-        val result = FFmpegKit.execute(cmdReencode)
-
-        if (!ReturnCode.isSuccess(result.returnCode)) {
-            Log.d("REC", "⚠️ Merge com prioridade FALHOU, usando fallback")
-            cleanup(workDir, segFiles, listFile, outTmp)
-            return mergeSegmentsCopyFirstFallback()
-        }
-
-        Log.d("REC", "✅ Merge com prioridade concluído com sucesso!")
-
-        val finalUri = createFinalMediaStoreOutput(gamePriority = true) ?: run {
-            cleanup(workDir, segFiles, listFile, outTmp)
-            return Uri.parse(seg.last())
-        }
-
-        try {
-            contentResolver.openOutputStream(finalUri, "w")?.use { os ->
-                outTmp.inputStream().use { it.copyTo(os) }
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                contentResolver.update(finalUri, values, null, null)
-            }
-
-            // Limpar segmentos temporários
-            seg.forEach { uriStr ->
-                try { contentResolver.delete(Uri.parse(uriStr), null, null) } catch (_: Exception) {}
+                val isPortrait = metadata?.let { it.height > it.width } ?: false
+                
+                val outputFile = File(workDir, "converted_${idx + 1}.mp4")
+                
+                if (isPortrait && targetLandscapeWidth > 0) {
+                    Log.d("REC", "  Convertendo segmento ${idx + 1}: ${metadata?.width}x${metadata?.height} (retrato) para ${targetLandscapeWidth}x${targetLandscapeHeight}")
+                    
+                    val convertCmd = "-y -i ${inputFile.absolutePath} " +
+                            "-vf \"scale=$targetLandscapeWidth:$targetLandscapeHeight:force_original_aspect_ratio=decrease," +
+                            "pad=$targetLandscapeWidth:$targetLandscapeHeight:(ow-iw)/2:(oh-ih)/2," +
+                            "setsar=1\" " +
+                            "-c:v libx264 -preset veryfast -crf 18 " +
+                            "-c:a aac -b:a 192k " +
+                            "${outputFile.absolutePath}"
+                    
+                    val result = FFmpegKit.execute(convertCmd)
+                    
+                    if (ReturnCode.isSuccess(result.returnCode)) {
+                        Log.d("REC", "  ✅ Conversão bem-sucedida")
+                        convertedFiles.add(outputFile)
+                    } else {
+                        Log.d("REC", "  ❌ Falha na conversão, usando original")
+                        convertedFiles.add(inputFile)
+                    }
+                } else {
+                    Log.d("REC", "  Mantendo segmento ${idx + 1} original (já em paisagem)")
+                    convertedFiles.add(inputFile)
+                }
             }
             
-            Log.d("REC", "✅ Arquivo final salvo em: $finalUri")
-        } catch (_: Exception) {
-            cleanup(workDir, segFiles, listFile, outTmp)
-            return Uri.parse(seg.last())
+            val listFile = File(workDir, "list.txt")
+            listFile.writeText(buildString {
+                convertedFiles.forEach { f ->
+                    append("file '")
+                    append(f.absolutePath.replace("'", "'\\''"))
+                    append("'\n")
+                }
+            })
+            
+            val mergedFile = File(workDir, "merged_${System.currentTimeMillis()}.mp4")
+            
+            val concatCmd = "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
+                    "-c:v libx264 -preset veryfast -crf 18 " +
+                    "-c:a aac -b:a 192k " +
+                    "${mergedFile.absolutePath}"
+            
+            Log.d("REC", "Concatenando ${convertedFiles.size} segmentos...")
+            val concatResult = FFmpegKit.execute(concatCmd)
+            
+            if (!ReturnCode.isSuccess(concatResult.returnCode)) {
+                Log.d("REC", "❌ Falha na concatenação")
+                cleanup(workDir, convertedFiles, listFile, mergedFile)
+                return mergeSegmentsNormal()
+            }
+            
+            Log.d("REC", "✅ Conversão e merge concluídos!")
+            
+            val finalUri = createFinalMediaStoreOutput(gameConverted = true) ?: run {
+                cleanup(workDir, convertedFiles, listFile, mergedFile)
+                return Uri.parse(seg.last())
+            }
+            
+            try {
+                contentResolver.openOutputStream(finalUri, "w")?.use { os ->
+                    mergedFile.inputStream().use { it.copyTo(os) }
+                }
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                    contentResolver.update(finalUri, values, null, null)
+                }
+                
+                seg.forEach { uriStr ->
+                    try { contentResolver.delete(Uri.parse(uriStr), null, null) } catch (_: Exception) {}
+                }
+                
+                Log.d("REC", "✅ Arquivo final salvo: $finalUri")
+                cleanup(workDir, convertedFiles, listFile, mergedFile)
+                return finalUri
+                
+            } catch (e: Exception) {
+                Log.d("REC", "❌ Erro ao salvar: ${e.message}")
+                cleanup(workDir, convertedFiles, listFile, mergedFile)
+                return Uri.parse(seg.last())
+            }
+            
+        } catch (e: Exception) {
+            Log.d("REC", "❌ Erro no processo de conversão: ${e.message}")
+            return mergeSegmentsNormal()
         }
-
-        cleanup(workDir, segFiles, listFile, outTmp)
-        return finalUri
     }
 
-    // Fallback normal
-    private fun mergeSegmentsCopyFirstFallback(): Uri? {
+    private fun mergeSegmentsNormal(): Uri? {
         val seg = segmentUris.toList()
         if (seg.isEmpty()) return null
         if (seg.size == 1) return Uri.parse(seg.first())
 
-        Log.d("REC", "📱 Iniciando merge normal (fallback)")
+        Log.d("REC", "📱 Merge normal (sem conversão)")
 
-        val workDir = File(cacheDir, "ffmerge_fallback")
+        val workDir = File(cacheDir, "ffmerge_normal")
         if (!workDir.exists()) workDir.mkdirs()
 
         val segFiles = mutableListOf<File>()
@@ -741,14 +772,13 @@ class ScreenRecordService : Service() {
 
         val outTmp = File(workDir, "merged_${System.currentTimeMillis()}.mp4")
 
-        // Primeiro tenta copy (mais rápido)
+        // Tentar copy primeiro
         val cmdCopy = "-y -f concat -safe 0 -i ${listFile.absolutePath} -c copy ${outTmp.absolutePath}"
         val s1 = FFmpegKit.execute(cmdCopy)
 
         var mergedOk = ReturnCode.isSuccess(s1.returnCode)
         if (!mergedOk) {
             Log.d("REC", "⚠️ Copy falhou, tentando re-encode...")
-            // Se falhar, tenta re-encode
             val cmdReencode = "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
                     "-c:v libx264 -preset veryfast -crf 18 " +
                     "-c:a aac -b:a 192k " +
@@ -757,7 +787,7 @@ class ScreenRecordService : Service() {
             val s2 = FFmpegKit.execute(cmdReencode)
             mergedOk = ReturnCode.isSuccess(s2.returnCode)
             if (!mergedOk) {
-                Log.d("REC", "❌ Merge fallback FALHOU")
+                Log.d("REC", "❌ Merge normal FALHOU")
                 cleanup(workDir, segFiles, listFile, outTmp)
                 return Uri.parse(seg.last())
             }
@@ -765,7 +795,7 @@ class ScreenRecordService : Service() {
 
         Log.d("REC", "✅ Merge normal concluído!")
 
-        val finalUri = createFinalMediaStoreOutput(gamePriority = false) ?: run {
+        val finalUri = createFinalMediaStoreOutput(gameConverted = false) ?: run {
             cleanup(workDir, segFiles, listFile, outTmp)
             return Uri.parse(seg.last())
         }
@@ -792,10 +822,10 @@ class ScreenRecordService : Service() {
         return finalUri
     }
 
-    private fun cleanup(dir: File, segFiles: List<File>, listFile: File?, outTmp: File?) {
-        try { segFiles.forEach { it.delete() } } catch (_: Exception) {}
+    private fun cleanup(dir: File, files: List<File>, listFile: File?, outFile: File?) {
+        try { files.forEach { it.delete() } } catch (_: Exception) {}
         try { listFile?.delete() } catch (_: Exception) {}
-        try { outTmp?.delete() } catch (_: Exception) {}
+        try { outFile?.delete() } catch (_: Exception) {}
     }
 
     private fun copyUriToFile(cr: ContentResolver, uri: Uri, outFile: File) {
@@ -806,10 +836,10 @@ class ScreenRecordService : Service() {
         } ?: throw IllegalStateException("Falha ao abrir InputStream: $uri")
     }
 
-    private fun createFinalMediaStoreOutput(gamePriority: Boolean): Uri? {
+    private fun createFinalMediaStoreOutput(gameConverted: Boolean): Uri? {
         val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val gameTag = if (gamePriority) "_with_game_${targetWidth}x${targetHeight}" else ""
-        val fileName = "record_${time}${gameTag}_final.mp4"
+        val suffix = if (gameConverted) "_game_converted_${targetLandscapeWidth}x${targetLandscapeHeight}" else ""
+        val fileName = "record_${time}${suffix}_final.mp4"
 
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
@@ -865,12 +895,7 @@ class ScreenRecordService : Service() {
             Notification.Builder(this)
         }
 
-        val gameInfo = when {
-            isGameMode && gamePackageName != null -> " 🎮 ${gamePackageName?.substringAfterLast('.')}"
-            hasGameSegment -> " 🎮 (jogo)"
-            else -> ""
-        }
-        
+        val gameInfo = if (isGameMode) " 🎮 ${gamePackageName?.substringAfterLast('.') ?: ""}" else ""
         val text = when (current) {
             RecState.RECORDING -> "Gravando... (Segmento $segmentIndex)$gameInfo"
             RecState.PAUSED -> "Pausado$gameInfo"
