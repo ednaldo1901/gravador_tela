@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.view.*
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
@@ -90,6 +91,14 @@ class OverlayBubbleService : Service() {
 
     private fun show() {
         if (root != null) return
+
+        // Verificar permissão de overlay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                stopSelf()
+                return
+            }
+        }
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -316,6 +325,7 @@ class OverlayBubbleService : Service() {
     private fun startFromBubble() {
         val i = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MainActivity.EXTRA_START_FROM_BUBBLE, true)
         }
         startActivity(i)
     }

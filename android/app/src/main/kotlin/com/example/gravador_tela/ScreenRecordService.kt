@@ -11,8 +11,8 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.*
+import android.provider.Settings 
 import android.provider.MediaStore
-import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.*
@@ -64,6 +64,9 @@ class ScreenRecordService : Service() {
         @Volatile var segmentUris: MutableList<String> = mutableListOf()
         @Volatile var segmentMetadata: MutableList<SegmentMetadata> = mutableListOf()
         @Volatile var eventSink: EventChannel.EventSink? = null
+        
+        // NOVO: Expor status de confirmação para o Flutter
+        @Volatile var gameConfirmationStatus: OrientationChangeType? = null
 
         @Volatile var startTime = 0L
         @Volatile var pauseOffset = 0L
@@ -120,6 +123,10 @@ class ScreenRecordService : Service() {
     
     private var confirmationOverlay: Dialog? = null
     private var windowManager: WindowManager? = null
+    
+    // NOVO: Scheduler para detecção periódica
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
+    private var lastDetectedPackage: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -202,6 +209,8 @@ class ScreenRecordService : Service() {
 
         if (orientationMode == 0) {
             registerRotationListener()
+            // NOVO: Iniciar detecção periódica
+            startPeriodicGameDetection()
         }
 
         sendEvent("start")
@@ -214,6 +223,27 @@ class ScreenRecordService : Service() {
         targetLandscapeWidth = 0
         targetLandscapeHeight = 0
         dismissConfirmationOverlay()
+        lastDetectedPackage = null
+    }
+
+    // NOVO: Detecção periódica a cada 2 segundos
+    private fun startPeriodicGameDetection() {
+        scheduler.scheduleAtFixedRate({
+            if (state == RecState.RECORDING) {
+                val currentPackage = getForegroundPackage()
+                if (currentPackage != null && currentPackage != lastDetectedPackage) {
+                    Log.d("REC", "🔄 Pacote mudou: $lastDetectedPackage -> $currentPackage")
+                    lastDetectedPackage = currentPackage
+                    
+                    // Se já estávamos em modo game e mudou para outro app, resetar?
+                    if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
+                        currentPackage == "com.example.gravador_tela") {
+                        // Voltou para nosso app, manter modo game? Decisão: manter
+                        Log.d("REC", "📱 Voltou para o app, mantendo modo game")
+                    }
+                }
+            }
+        }, 2, 2, TimeUnit.SECONDS)
     }
 
     private fun isPackageConfirmedAsGame(packageName: String): Boolean {
@@ -227,6 +257,15 @@ class ScreenRecordService : Service() {
 
     private fun showGameConfirmationDialog(packageName: String, rotation: Int) {
         if (confirmationOverlay?.isShowing == true) return
+        
+        // Verificar permissão de overlay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                Log.e("REC", "Sem permissão de overlay para diálogo")
+                continueRecordingAfterConfirmation(false, rotation)
+                return
+            }
+        }
         
         try {
             val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
@@ -253,8 +292,9 @@ class ScreenRecordService : Service() {
             
             layout.addView(createSpacer(dp(16)))
             
+            val appName = packageName.substringAfterLast('.').take(20)
             val message = TextView(this).apply {
-                text = "O app '$packageName' mudou para orientação paisagem.\n\n" +
+                text = "O app '$appName' mudou para orientação paisagem.\n\n" +
                        "Isso geralmente acontece em JOGOS.\n\n" +
                        "Deseja tratar como MODO GAME?\n" +
                        "(Isso irá converter todos os segmentos para paisagem)"
@@ -368,7 +408,6 @@ class ScreenRecordService : Service() {
         }
     }
 
-    // CORREÇÃO: Método createSpacer SEM topMargin
     private fun createSpacer(height: Int): View {
         return Space(this).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -387,8 +426,9 @@ class ScreenRecordService : Service() {
 
     private fun continueRecordingAfterConfirmation(isGame: Boolean, rotation: Int) {
         if (isGame) {
-            targetLandscapeWidth = max(getRealMetrics().first, getRealMetrics().second)
-            targetLandscapeHeight = min(getRealMetrics().first, getRealMetrics().second)
+            val metrics = getRealMetrics()
+            targetLandscapeWidth = max(metrics.first, metrics.second)
+            targetLandscapeHeight = min(metrics.first, metrics.second)
             hasPortraitSegments = true
             
             Log.d("REC", "🎮 Modo game confirmado pelo usuário")
@@ -473,6 +513,7 @@ class ScreenRecordService : Service() {
         displayListener?.let { displayManager?.unregisterDisplayListener(it) }
         displayListener = null
         dismissConfirmationOverlay()
+        scheduler.shutdown()
     }
 
     private fun restartSegmentForRotation(rot: Int, isGameForced: Boolean) {
@@ -714,6 +755,7 @@ class ScreenRecordService : Service() {
     override fun onDestroy() {
         unregisterRotationListener()
         dismissConfirmationOverlay()
+        scheduler.shutdownNow()
         super.onDestroy()
     }
 
@@ -996,7 +1038,8 @@ class ScreenRecordService : Service() {
 
     private fun createMediaStoreOutput(part: Int): Pair<Uri, ParcelFileDescriptor> {
         val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val fileName = "record_${time}_p${part}.mp4"
+        val gameTag = if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME) "_game" else ""
+        val fileName = "record_${time}${gameTag}_p${part}.mp4"
 
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)

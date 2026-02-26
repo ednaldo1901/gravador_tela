@@ -1,9 +1,11 @@
 package com.example.gravador_tela
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -75,7 +77,8 @@ class MainActivity : FlutterActivity() {
                             "lastUri" to ScreenRecordService.lastOutputUriString,
                             "finalUri" to ScreenRecordService.finalOutputUriString,
                             "elapsed" to ScreenRecordService.getElapsedForFlutter(),
-                            "segments" to ScreenRecordService.segmentUris.toList()
+                            "segments" to ScreenRecordService.segmentUris.toList(),
+                            "gameConfirmationStatus" to ScreenRecordService.gameConfirmationStatus?.name
                         )
                         result.success(map)
                     }
@@ -91,15 +94,18 @@ class MainActivity : FlutterActivity() {
                     "openOverlaySettings" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                            intent.data = Uri.parse("package:$packageName")
                             startActivityForResult(intent, REQ_OVERLAY_PERM)
                         }
                         result.success(null)
                     }
 
                     "showBubble" -> {
-                        startService(Intent(this, OverlayBubbleService::class.java).apply {
-                            action = OverlayBubbleService.ACTION_SHOW
-                        })
+                        if (!isServiceRunning(OverlayBubbleService::class.java)) {
+                            startService(Intent(this, OverlayBubbleService::class.java).apply {
+                                action = OverlayBubbleService.ACTION_SHOW
+                            })
+                        }
                         result.success(null)
                     }
 
@@ -113,6 +119,16 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun isServiceRunning(serviceClass: Class<*>): Boolean {
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        for (service in manager.getRunningServices(Integer.MAX_VALUE)) {
+            if (serviceClass.name == service.service.className) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun requestMediaProjection() {
