@@ -100,6 +100,29 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    // NOVOS MÉTODOS PARA USAGE STATS
+                    "hasUsageStatsPermission" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            val appOps = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+                            val mode = appOps.checkOpNoThrow(
+                                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                                android.os.Process.myUid(),
+                                packageName
+                            )
+                            result.success(mode == android.app.AppOpsManager.MODE_ALLOWED)
+                        } else {
+                            result.success(false)
+                        }
+                    }
+
+                    "openUsageStatsSettings" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                            startActivity(intent)
+                        }
+                        result.success(null)
+                    }
+
                     "showBubble" -> {
                         if (!isServiceRunning(OverlayBubbleService::class.java)) {
                             startService(Intent(this, OverlayBubbleService::class.java).apply {

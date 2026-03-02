@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:gravador_tela/core/platform/overlay_bubble_channel.dart';
+import 'package:gravador_tela/core/platform/usage_stats_channel.dart';
 import 'package:provider/provider.dart';
 
 import '../recorder/recording_controller.dart';
@@ -15,6 +16,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   bool bubbleEnabled = false;
   bool _initialized = false;
+  bool _hasUsageStatsPermission = false;
 
   @override
   void didChangeDependencies() {
@@ -22,6 +24,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!_initialized) {
       _initialized = true;
       _checkBubbleStatus();
+      _checkUsageStatsPermission();
     }
   }
 
@@ -29,6 +32,13 @@ class _SettingsPageState extends State<SettingsPage> {
     final hasPerm = await OverlayBubbleChannel.hasPermission();
     if (mounted) {
       setState(() => bubbleEnabled = hasPerm);
+    }
+  }
+
+  Future<void> _checkUsageStatsPermission() async {
+    final hasPerm = await UsageStatsChannel.hasPermission();
+    if (mounted) {
+      setState(() => _hasUsageStatsPermission = hasPerm);
     }
   }
 
@@ -97,6 +107,64 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
+
+          // NOVO: AVISO DE PERMISSÃO USAGE STATS
+          if (!_hasUsageStatsPermission) ...[
+            const SizedBox(height: 8),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.amber.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.amber.withOpacity(0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.warning_amber, color: Colors.amber),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Permissão de Uso Necessária',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Para detectar jogos automaticamente, ative o "Acesso a dados de uso" nas configurações.',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      await UsageStatsChannel.openSettings();
+                      // Verificar novamente após voltar
+                      await Future.delayed(const Duration(seconds: 2));
+                      await _checkUsageStatsPermission();
+                    },
+                    icon: const Icon(Icons.settings),
+                    label: const Text('Abrir Configurações'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amber,
+                      foregroundColor: Colors.black,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           
           const SizedBox(height: 16),
           
@@ -123,6 +191,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 const SizedBox(height: 12),
                 _buildInfoRow('Versão', '1.0.0'),
                 _buildInfoRow('Modo atual', controller.orientationMode.name.toUpperCase()),
+                _buildInfoRow('Detecção automática', _hasUsageStatsPermission ? '✅ Ativa' : '⚠️ Inativa'),
               ],
             ),
           ),
