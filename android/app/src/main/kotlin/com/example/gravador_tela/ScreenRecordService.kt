@@ -11,8 +11,8 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.*
-import android.provider.Settings 
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.*
@@ -32,7 +32,7 @@ import kotlin.math.min
 class ScreenRecordService : Service() {
 
     enum class RecState { IDLE, RECORDING, PAUSED, STOPPING }
-    
+
     enum class OrientationChangeType {
         NORMAL,      // App comum (não perguntar)
         GAME_LIKE,   // Possível game (perguntar)
@@ -44,7 +44,7 @@ class ScreenRecordService : Service() {
         const val ACTION_STOP = "ACTION_STOP"
         const val ACTION_PAUSE = "ACTION_PAUSE"
         const val ACTION_RESUME = "ACTION_RESUME"
-        
+
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_DATA_INTENT = "EXTRA_DATA_INTENT"
         const val EXTRA_BITRATE = "EXTRA_BITRATE"
@@ -54,7 +54,7 @@ class ScreenRecordService : Service() {
 
         private const val NOTIF_CHANNEL_ID = "screen_record_channel"
         private const val NOTIF_ID = 101
-        
+
         private const val PREFS_NAME = "ScreenRecorderPrefs"
         private const val PREF_GAME_PACKAGE_PREFIX = "game_package_"
 
@@ -64,8 +64,8 @@ class ScreenRecordService : Service() {
         @Volatile var segmentUris: MutableList<String> = mutableListOf()
         @Volatile var segmentMetadata: MutableList<SegmentMetadata> = mutableListOf()
         @Volatile var eventSink: EventChannel.EventSink? = null
-        
-        // NOVO: Expor status de confirmação para o Flutter
+
+        // Expor status de confirmação para o Flutter
         @Volatile var gameConfirmationStatus: OrientationChangeType? = null
 
         @Volatile var startTime = 0L
@@ -105,13 +105,13 @@ class ScreenRecordService : Service() {
     private var segmentIndex = 0
     private var currentRotation = Surface.ROTATION_0
     private var lastRotationChangeAt = 0L
-    
+
     @Volatile private var gameConfirmationStatus = OrientationChangeType.NORMAL
     @Volatile private var pendingGamePackage: String? = null
     @Volatile private var pendingRotation = Surface.ROTATION_0
-    
+
     private lateinit var prefs: SharedPreferences
-    
+
     private var targetLandscapeWidth = 0
     private var targetLandscapeHeight = 0
     private var hasPortraitSegments = false
@@ -120,13 +120,16 @@ class ScreenRecordService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var displayManager: DisplayManager? = null
     private var displayListener: DisplayManager.DisplayListener? = null
-    
+
     private var confirmationOverlay: Dialog? = null
     private var windowManager: WindowManager? = null
-    
-    // NOVO: Scheduler para detecção periódica
+
+    // Scheduler para detecção periódica
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private var lastDetectedPackage: String? = null
+
+    // Guardar o último app antes do gravador
+    private var lastAppBeforeRecorder: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -135,7 +138,6 @@ class ScreenRecordService : Service() {
         createNotificationChannel()
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
@@ -186,6 +188,9 @@ class ScreenRecordService : Service() {
 
         resetState()
 
+        // Guardar o último app antes do gravador
+        storeLastAppBeforeRecording()
+
         state = RecState.RECORDING
         startForegroundServiceWithType()
 
@@ -209,12 +214,29 @@ class ScreenRecordService : Service() {
 
         if (orientationMode == 0) {
             registerRotationListener()
-            // NOVO: Iniciar detecção periódica
             startPeriodicGameDetection()
         }
 
         sendEvent("start")
         notifyUpdateNotification()
+    }
+
+    private fun storeLastAppBeforeRecording() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                @Suppress("DEPRECATION")
+                val runningTasks = activityManager.getRunningTasks(2)
+                if (runningTasks.size >= 2) {
+                    lastAppBeforeRecorder = runningTasks[1].topActivity?.packageName
+                    Log.d("REC", "📱 Último app antes do gravador: $lastAppBeforeRecorder")
+                } else {
+                    Log.d("REC", "📱 Não foi possível determinar o último app")
+                }
+            } catch (e: Exception) {
+                Log.e("REC", "Erro ao obter último app: ${e.message}")
+            }
+        }
     }
 
     private fun resetState() {
@@ -224,9 +246,67 @@ class ScreenRecordService : Service() {
         targetLandscapeHeight = 0
         dismissConfirmationOverlay()
         lastDetectedPackage = null
+        lastAppBeforeRecorder = null
     }
 
-    // NOVO: Detecção periódica a cada 2 segundos
+    private fun getMostLikelyGameApp(): String? {
+        Log.d("REC", "🔍 Buscando app mais provável para modo game...")
+
+        if (lastAppBeforeRecorder != null) {
+            Log.d("REC", "   Último app antes do gravador: $lastAppBeforeRecorder")
+            return lastAppBeforeRecorder
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
+                val endTime = System.currentTimeMillis()
+                val startTime = endTime - 2 * 60 * 1000
+
+                val stats = usageStatsManager.queryUsageStats(
+                    android.app.usage.UsageStatsManager.INTERVAL_DAILY,
+                    startTime,
+                    endTime
+                )
+
+                if (!stats.isNullOrEmpty()) {
+                    val sortedStats = stats
+                        .filter { it.packageName != "com.example.gravador_tela" }
+                        .sortedByDescending { it.lastTimeUsed }
+
+                    if (sortedStats.isNotEmpty()) {
+                        val mostRecent = sortedStats.first().packageName
+                        Log.d("REC", "   App mais recente via UsageStats: $mostRecent")
+                        return mostRecent
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d("REC", "   UsageStats não disponível: ${e.message}")
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                @Suppress("DEPRECATION")
+                val runningTasks = activityManager.getRunningTasks(5)
+
+                for (task in runningTasks) {
+                    val packageName = task.topActivity?.packageName
+                    if (packageName != null && packageName != "com.example.gravador_tela") {
+                        Log.d("REC", "   App em background via runningTasks: $packageName")
+                        return packageName
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d("REC", "   Erro runningTasks: ${e.message}")
+            }
+        }
+
+        Log.d("REC", "   Nenhum app candidato encontrado")
+        return null
+    }
+
     private fun startPeriodicGameDetection() {
         scheduler.scheduleAtFixedRate({
             if (state == RecState.RECORDING) {
@@ -234,11 +314,10 @@ class ScreenRecordService : Service() {
                 if (currentPackage != null && currentPackage != lastDetectedPackage) {
                     Log.d("REC", "🔄 Pacote mudou: $lastDetectedPackage -> $currentPackage")
                     lastDetectedPackage = currentPackage
-                    
-                    // Se já estávamos em modo game e mudou para outro app, resetar?
-                    if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
-                        currentPackage == "com.example.gravador_tela") {
-                        // Voltou para nosso app, manter modo game? Decisão: manter
+
+                    if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME &&
+                        currentPackage == "com.example.gravador_tela"
+                    ) {
                         Log.d("REC", "📱 Voltou para o app, mantendo modo game")
                     }
                 }
@@ -257,8 +336,7 @@ class ScreenRecordService : Service() {
 
     private fun showGameConfirmationDialog(packageName: String, rotation: Int) {
         if (confirmationOverlay?.isShowing == true) return
-        
-        // Verificar permissão de overlay
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (!Settings.canDrawOverlays(this)) {
                 Log.e("REC", "Sem permissão de overlay para diálogo")
@@ -266,11 +344,11 @@ class ScreenRecordService : Service() {
                 return
             }
         }
-        
+
         try {
             val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
             dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-            
+
             val layout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(24), dp(24), dp(24), dp(24))
@@ -280,7 +358,7 @@ class ScreenRecordService : Service() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            
+
             val title = TextView(this).apply {
                 text = "🔄 Rotação Detectada"
                 setTextColor(0xFFFFFFFF.toInt())
@@ -289,23 +367,23 @@ class ScreenRecordService : Service() {
                 gravity = Gravity.CENTER
             }
             layout.addView(title)
-            
+
             layout.addView(createSpacer(dp(16)))
-            
+
             val appName = packageName.substringAfterLast('.').take(20)
             val message = TextView(this).apply {
                 text = "O app '$appName' mudou para orientação paisagem.\n\n" +
-                       "Isso geralmente acontece em JOGOS.\n\n" +
-                       "Deseja tratar como MODO GAME?\n" +
-                       "(Isso irá converter todos os segmentos para paisagem)"
+                        "Isso geralmente acontece em JOGOS.\n\n" +
+                        "Deseja tratar como MODO GAME?\n" +
+                        "(Isso irá converter todos os segmentos para paisagem)"
                 setTextColor(0xCCFFFFFF.toInt())
                 textSize = 14f
                 gravity = Gravity.CENTER
             }
             layout.addView(message)
-            
+
             layout.addView(createSpacer(dp(24)))
-            
+
             val buttonLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = ViewGroup.LayoutParams(
@@ -313,7 +391,7 @@ class ScreenRecordService : Service() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            
+
             val btnNo = Button(this).apply {
                 text = "Não (App Normal)"
                 setTextColor(0xFFFFFFFF.toInt())
@@ -330,7 +408,7 @@ class ScreenRecordService : Service() {
                 }
             }
             buttonLayout.addView(btnNo)
-            
+
             val btnYes = Button(this).apply {
                 text = "Sim (Modo Game) 🎮"
                 setTextColor(0xFFFFFFFF.toInt())
@@ -348,9 +426,9 @@ class ScreenRecordService : Service() {
                 }
             }
             buttonLayout.addView(btnYes)
-            
+
             layout.addView(buttonLayout)
-            
+
             val checkBoxLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -359,18 +437,18 @@ class ScreenRecordService : Service() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            
+
             val checkBox = CheckBox(this).apply {
                 id = View.generateViewId()
                 setTextColor(0xCCFFFFFF.toInt())
                 text = "Lembrar minha escolha para este app"
             }
             checkBoxLayout.addView(checkBox)
-            
+
             layout.addView(checkBoxLayout)
-            
+
             dialog.setContentView(layout)
-            
+
             val params = dialog.window?.attributes
             params?.width = WindowManager.LayoutParams.MATCH_PARENT
             params?.height = WindowManager.LayoutParams.WRAP_CONTENT
@@ -384,24 +462,20 @@ class ScreenRecordService : Service() {
             params?.flags = params?.flags?.and(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL.inv()) ?: 0
             params?.flags = params?.flags?.or(WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH) ?: 0
             params?.flags = params?.flags?.or(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN) ?: 0
-            
+
             dialog.window?.attributes = params
             dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             dialog.window?.setDimAmount(0.6f)
-            
-            dialog.setOnDismissListener {
-                confirmationOverlay = null
-            }
-            
+
+            dialog.setOnDismissListener { confirmationOverlay = null }
+
             dialog.show()
             confirmationOverlay = dialog
-            
+
             checkBox.setOnCheckedChangeListener { _, isChecked ->
-                if (isChecked) {
-                    Log.d("REC", "💾 Usuário marcou 'Lembrar' para $packageName")
-                }
+                if (isChecked) Log.d("REC", "💾 Usuário marcou 'Lembrar' para $packageName")
             }
-            
+
         } catch (e: Exception) {
             Log.e("REC", "Erro ao mostrar diálogo: ${e.message}")
             continueRecordingAfterConfirmation(false, rotation)
@@ -418,9 +492,7 @@ class ScreenRecordService : Service() {
     }
 
     private fun dismissConfirmationOverlay() {
-        try {
-            confirmationOverlay?.dismiss()
-        } catch (_: Exception) {}
+        try { confirmationOverlay?.dismiss() } catch (_: Exception) {}
         confirmationOverlay = null
     }
 
@@ -430,10 +502,10 @@ class ScreenRecordService : Service() {
             targetLandscapeWidth = max(metrics.first, metrics.second)
             targetLandscapeHeight = min(metrics.first, metrics.second)
             hasPortraitSegments = true
-            
+
             Log.d("REC", "🎮 Modo game confirmado pelo usuário")
             Log.d("REC", "🎯 Resolução alvo: ${targetLandscapeWidth}x${targetLandscapeHeight}")
-            
+
             restartSegmentForRotation(rotation, isGameForced = true)
         } else {
             restartSegmentForRotation(rotation, isGameForced = false)
@@ -448,38 +520,37 @@ class ScreenRecordService : Service() {
             override fun onDisplayRemoved(displayId: Int) {}
             override fun onDisplayChanged(displayId: Int) {
                 if (state != RecState.RECORDING) return
-                
+
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastRotationChangeAt < 800) return
                 lastRotationChangeAt = now
 
                 val rot = getDefaultDisplayRotation()
-                
                 if (rot == currentRotation) return
-                
+
                 val oldRotation = currentRotation
                 currentRotation = rot
-                
+
                 Log.d("REC", "🔄 Rotação mudou: $oldRotation -> $rot")
-                
+
                 val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
-                
+
                 if (isLandscape && gameConfirmationStatus == OrientationChangeType.NORMAL) {
-                    val packageName = getForegroundPackage()
-                    
-                    if (packageName != null && packageName != "com.example.gravador_tela") {
-                        if (isPackageConfirmedAsGame(packageName)) {
-                            Log.d("REC", "🎮 Pacote já confirmado como game: $packageName")
+                    val candidatePackage = getMostLikelyGameApp()
+
+                    if (candidatePackage != null) {
+                        if (isPackageConfirmedAsGame(candidatePackage)) {
+                            Log.d("REC", "🎮 Pacote já confirmado como game: $candidatePackage")
                             gameConfirmationStatus = OrientationChangeType.CONFIRMED_GAME
                             restartSegmentForRotation(rot, isGameForced = true)
                         } else {
-                            Log.d("REC", "❓ Primeira rotação para $packageName - perguntando usuário")
-                            pendingGamePackage = packageName
+                            Log.d("REC", "❓ Primeira rotação - perguntando sobre $candidatePackage")
+                            pendingGamePackage = candidatePackage
                             pendingRotation = rot
-                            
-                            showGameConfirmationDialog(packageName, rot)
+                            showGameConfirmationDialog(candidatePackage, rot)
                         }
                     } else {
+                        Log.d("REC", "   Nenhum app candidato encontrado, tratando como normal")
                         restartSegmentForRotation(rot, isGameForced = false)
                     }
                 } else if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME) {
@@ -495,17 +566,49 @@ class ScreenRecordService : Service() {
     }
 
     private fun getForegroundPackage(): String? {
+        Log.d("REC", "🔍 Tentando obter pacote em primeiro plano...")
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
-                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                @Suppress("DEPRECATION")
                 val runningTasks = activityManager.getRunningTasks(1)
+                Log.d("REC", "   runningTasks size: ${runningTasks.size}")
+
                 if (runningTasks.isNotEmpty()) {
-                    return runningTasks[0].topActivity?.packageName
+                    val topActivity = runningTasks[0].topActivity
+                    Log.d("REC", "   topActivity: $topActivity")
+
+                    val packageName = topActivity?.packageName
+                    Log.d("REC", "   packageName: $packageName")
+
+                    return packageName
+                } else {
+                    Log.d("REC", "   runningTasks está vazio!")
                 }
             } catch (e: Exception) {
-                Log.d("REC", "Erro ao obter pacote: ${e.message}")
+                Log.e("REC", "❌ Erro ao obter pacote: ${e.message}")
+                e.printStackTrace()
+            }
+        } else {
+            Log.d("REC", "   Android version < Q (API 29), não suportado")
+
+            try {
+                @Suppress("DEPRECATION")
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                @Suppress("DEPRECATION")
+                val runningTasks = activityManager.getRunningTasks(1)
+                if (runningTasks.isNotEmpty()) {
+                    val packageName = runningTasks[0].topActivity?.packageName
+                    Log.d("REC", "   (fallback) packageName: $packageName")
+                    return packageName
+                }
+            } catch (e: Exception) {
+                Log.e("REC", "❌ Erro no fallback: ${e.message}")
             }
         }
+
+        Log.d("REC", "   Não foi possível obter pacote")
         return null
     }
 
@@ -513,7 +616,7 @@ class ScreenRecordService : Service() {
         displayListener?.let { displayManager?.unregisterDisplayListener(it) }
         displayListener = null
         dismissConfirmationOverlay()
-        scheduler.shutdown()
+        try { scheduler.shutdown() } catch (_: Exception) {}
     }
 
     private fun restartSegmentForRotation(rot: Int, isGameForced: Boolean) {
@@ -524,15 +627,15 @@ class ScreenRecordService : Service() {
 
     private fun startForegroundServiceWithType() {
         val notification = buildNotification(state)
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val foregroundServiceType = if (recordMic) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or 
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             }
-            
+
             startForeground(NOTIF_ID, notification, foregroundServiceType)
         } else {
             startForeground(NOTIF_ID, notification)
@@ -547,28 +650,26 @@ class ScreenRecordService : Service() {
             gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape -> {
                 val gameW = max(realW, realH)
                 val gameH = min(realW, realH)
-                
+
                 Log.d("REC", "🎮 SEGMENTO DE JOGO (confirmado): ${gameW}x${gameH}")
-                
+
                 if (targetLandscapeWidth == 0) {
                     targetLandscapeWidth = gameW
                     targetLandscapeHeight = gameH
                 }
-                
+
                 Pair(gameW, gameH)
             }
-            
+
             gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && !isLandscape -> {
                 Log.d("REC", "🎮 Segmento GAME RETRATO: ${realW}x${realH}")
                 hasPortraitSegments = true
                 portraitSegmentsCount++
                 Pair(realW, realH)
             }
-            
-            orientationMode == 1 -> // Portrait fixo
-                Pair(min(realW, realH), max(realW, realH))
-            orientationMode == 2 -> // Landscape fixo
-                Pair(max(realW, realH), min(realW, realH))
+
+            orientationMode == 1 -> Pair(min(realW, realH), max(realW, realH)) // Portrait fixo
+            orientationMode == 2 -> Pair(max(realW, realH), min(realW, realH)) // Landscape fixo
             orientationMode == 3 -> { // Square
                 val s = min(realW, realH)
                 Pair(s, s)
@@ -633,12 +734,15 @@ class ScreenRecordService : Service() {
         )
 
         recorder!!.start()
-        sendEvent("segment", mapOf(
-            "segmentIndex" to segmentIndex,
-            "width" to w,
-            "height" to h,
-            "isGameMode" to (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape)
-        ))
+        sendEvent(
+            "segment",
+            mapOf(
+                "segmentIndex" to segmentIndex,
+                "width" to w,
+                "height" to h,
+                "isGameMode" to (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape)
+            )
+        )
         notifyUpdateNotification()
     }
 
@@ -716,11 +820,14 @@ class ScreenRecordService : Service() {
         Log.d("REC", "   Resolução alvo: ${targetLandscapeWidth}x${targetLandscapeHeight}")
 
         state = RecState.STOPPING
-        sendEvent("stopping", mapOf(
-            "gameConfirmationStatus" to gameConfirmationStatus.name,
-            "hasPortraitSegments" to hasPortraitSegments,
-            "portraitSegmentsCount" to portraitSegmentsCount
-        ))
+        sendEvent(
+            "stopping",
+            mapOf(
+                "gameConfirmationStatus" to gameConfirmationStatus.name,
+                "hasPortraitSegments" to hasPortraitSegments,
+                "portraitSegmentsCount" to portraitSegmentsCount
+            )
+        )
         notifyUpdateNotification()
 
         stopCurrentRecorderOnly()
@@ -729,24 +836,31 @@ class ScreenRecordService : Service() {
         mediaProjection = null
 
         Thread {
-            val finalUri = if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
-                targetLandscapeWidth > 0 && hasPortraitSegments) {
+            val finalUri = if (
+                gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME &&
+                targetLandscapeWidth > 0 && hasPortraitSegments
+            ) {
                 Log.d("REC", "🔄 Usando conversão retrato -> paisagem (modo game confirmado)")
                 convertPortraitToLandscapeAndMerge()
             } else {
                 Log.d("REC", "📱 Usando merge normal")
                 mergeSegmentsNormal()
             }
-            
+
             finalOutputUriString = finalUri?.toString()
             lastOutputUriString = finalOutputUriString
 
             state = RecState.IDLE
-            sendEvent("stop", mapOf(
-                "finalUri" to finalOutputUriString,
-                "conversionApplied" to (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
-                    targetLandscapeWidth > 0 && hasPortraitSegments)
-            ))
+            sendEvent(
+                "stop",
+                mapOf(
+                    "finalUri" to finalOutputUriString,
+                    "conversionApplied" to (
+                            gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME &&
+                                    targetLandscapeWidth > 0 && hasPortraitSegments
+                            )
+                )
+            )
             stopForeground(true)
             stopSelf()
         }.start()
@@ -755,7 +869,7 @@ class ScreenRecordService : Service() {
     override fun onDestroy() {
         unregisterRotationListener()
         dismissConfirmationOverlay()
-        scheduler.shutdownNow()
+        try { scheduler.shutdownNow() } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -772,30 +886,34 @@ class ScreenRecordService : Service() {
         if (!workDir.exists()) workDir.mkdirs()
 
         val convertedFiles = mutableListOf<File>()
-        
+
         try {
             seg.forEachIndexed { idx, uriStr ->
                 val inputFile = File(workDir, "input_${idx + 1}.mp4")
                 copyUriToFile(contentResolver, Uri.parse(uriStr), inputFile)
-                
+
                 val metadata = segmentMetadata.find { it.uri == uriStr }
                 val isPortrait = metadata?.let { it.height > it.width } ?: false
-                
+
                 val outputFile = File(workDir, "converted_${idx + 1}.mp4")
-                
+
                 if (isPortrait && targetLandscapeWidth > 0) {
-                    Log.d("REC", "  Convertendo segmento ${idx + 1}: ${metadata?.width}x${metadata?.height} -> ${targetLandscapeWidth}x${targetLandscapeHeight}")
-                    
-                    val convertCmd = "-y -i ${inputFile.absolutePath} " +
-                            "-vf \"scale=$targetLandscapeWidth:$targetLandscapeHeight:force_original_aspect_ratio=decrease," +
-                            "pad=$targetLandscapeWidth:$targetLandscapeHeight:(ow-iw)/2:(oh-ih)/2," +
-                            "setsar=1\" " +
-                            "-c:v libx264 -preset veryfast -crf 18 " +
-                            "-c:a aac -b:a 192k " +
-                            "${outputFile.absolutePath}"
-                    
+                    Log.d(
+                        "REC",
+                        "  Convertendo segmento ${idx + 1}: ${metadata?.width}x${metadata?.height} -> ${targetLandscapeWidth}x${targetLandscapeHeight}"
+                    )
+
+                    val convertCmd =
+                        "-y -i ${inputFile.absolutePath} " +
+                                "-vf \"scale=$targetLandscapeWidth:$targetLandscapeHeight:force_original_aspect_ratio=decrease," +
+                                "pad=$targetLandscapeWidth:$targetLandscapeHeight:(ow-iw)/2:(oh-ih)/2," +
+                                "setsar=1\" " +
+                                "-c:v libx264 -preset veryfast -crf 18 " +
+                                "-c:a aac -b:a 192k " +
+                                "${outputFile.absolutePath}"
+
                     val result = FFmpegKit.execute(convertCmd)
-                    
+
                     if (ReturnCode.isSuccess(result.returnCode)) {
                         Log.d("REC", "  ✅ Conversão OK")
                         convertedFiles.add(outputFile)
@@ -808,60 +926,63 @@ class ScreenRecordService : Service() {
                     convertedFiles.add(inputFile)
                 }
             }
-            
+
             val listFile = File(workDir, "list.txt")
-            listFile.writeText(buildString {
-                convertedFiles.forEach { f ->
-                    append("file '")
-                    append(f.absolutePath.replace("'", "'\\''"))
-                    append("'\n")
+            listFile.writeText(
+                buildString {
+                    convertedFiles.forEach { f ->
+                        append("file '")
+                        append(f.absolutePath.replace("'", "'\\''"))
+                        append("'\n")
+                    }
                 }
-            })
-            
+            )
+
             val mergedFile = File(workDir, "merged_${System.currentTimeMillis()}.mp4")
-            
-            val concatCmd = "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
-                    "-c:v libx264 -preset veryfast -crf 18 " +
-                    "-c:a aac -b:a 192k " +
-                    "${mergedFile.absolutePath}"
-            
+
+            val concatCmd =
+                "-y -f concat -safe 0 -i ${listFile.absolutePath} " +
+                        "-c:v libx264 -preset veryfast -crf 18 " +
+                        "-c:a aac -b:a 192k " +
+                        "${mergedFile.absolutePath}"
+
             Log.d("REC", "Concatenando...")
             val concatResult = FFmpegKit.execute(concatCmd)
-            
+
             if (!ReturnCode.isSuccess(concatResult.returnCode)) {
                 cleanup(workDir, convertedFiles, listFile, mergedFile)
                 return mergeSegmentsNormal()
             }
-            
+
             Log.d("REC", "✅ Conversão concluída!")
-            
+
             val finalUri = createFinalMediaStoreOutput(gameConverted = true) ?: run {
                 cleanup(workDir, convertedFiles, listFile, mergedFile)
                 return Uri.parse(seg.last())
             }
-            
+
             try {
                 contentResolver.openOutputStream(finalUri, "w")?.use { os ->
                     mergedFile.inputStream().use { it.copyTo(os) }
                 }
-                
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
                     contentResolver.update(finalUri, values, null, null)
                 }
-                
+
                 seg.forEach { uriStr ->
                     try { contentResolver.delete(Uri.parse(uriStr), null, null) } catch (_: Exception) {}
                 }
-                
+
                 cleanup(workDir, convertedFiles, listFile, mergedFile)
                 return finalUri
-                
+
             } catch (e: Exception) {
                 cleanup(workDir, convertedFiles, listFile, mergedFile)
                 return Uri.parse(seg.last())
             }
-            
+
         } catch (e: Exception) {
             return mergeSegmentsNormal()
         }
@@ -1007,19 +1128,25 @@ class ScreenRecordService : Service() {
             .setContentIntent(openAppPending)
 
         if (current == RecState.RECORDING) {
-            builder.addAction(Notification.Action.Builder(
-                android.R.drawable.ic_media_pause, "Pausar", pausePending
-            ).build())
+            builder.addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_media_pause, "Pausar", pausePending
+                ).build()
+            )
         } else if (current == RecState.PAUSED) {
-            builder.addAction(Notification.Action.Builder(
-                android.R.drawable.ic_media_play, "Retomar", resumePending
-            ).build())
+            builder.addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_media_play, "Retomar", resumePending
+                ).build()
+            )
         }
 
         if (current == RecState.RECORDING || current == RecState.PAUSED || current == RecState.STOPPING) {
-            builder.addAction(Notification.Action.Builder(
-                android.R.drawable.ic_menu_close_clear_cancel, "Parar", stopPending
-            ).build())
+            builder.addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_menu_close_clear_cancel, "Parar", stopPending
+                ).build()
+            )
         }
 
         return builder.build()
