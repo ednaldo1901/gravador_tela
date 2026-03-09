@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:gravador_tela/app/app_shell.dart';
+import 'package:gravador_tela/features/editor/editor_controller.dart';
 import 'package:provider/provider.dart';
 
 import 'features/recorder/recording_controller.dart';
@@ -18,6 +19,7 @@ class MyApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => RecordingController()),
         ChangeNotifierProvider(create: (_) => GalleryController()),
+        ChangeNotifierProvider(create: (_) => EditorController ()),
       ],
       child: MaterialApp(
         debugShowCheckedModeBanner: false,

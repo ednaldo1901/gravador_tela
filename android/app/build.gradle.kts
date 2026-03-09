@@ -37,6 +37,12 @@ android {
 dependencies {
     // ✅ FFmpegKit (fork disponível no Maven Central)
     implementation("com.mrljdx:ffmpeg-kit-full:6.1.4")
+     // ❌ FORÇAR exclusão do plugin problemático, caso seja puxado como dependência transitiva
+    configurations.all {
+        exclude(group = "com.github.arthenica", module = "ffmpeg-kit-android-min-gpl")
+        exclude(group = "com.arthenica", module = "ffmpeg-kit-min-gpl")
+        // Adicione outras variações se necessário
+    }
 }
 
 flutter {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:gravador_tela/features/editor/editor_page.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:provider/provider.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
@@ -373,6 +374,30 @@ class _VideoCard extends StatelessWidget {
                 ],
               ),
             ),
+            // No _VideoCard, adicionar um botão de editar
+// Adicione no Stack, próximo ao duration badge:
+
+Positioned(
+  top: 12,
+  right: 12,
+  child: Container(
+    decoration: BoxDecoration(
+      color: Colors.black.withOpacity(0.55),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.white.withOpacity(0.10)),
+    ),
+    child: IconButton(
+      icon: const Icon(Icons.edit, color: Colors.white, size: 18),
+      onPressed: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => EditorPage(initialVideo: asset),
+          ),
+        );
+      },
+    ),
+  ),
+),
 
             // Duration badge
             Positioned(
@@ -396,6 +421,7 @@ class _VideoCard extends StatelessWidget {
                 ),
               ),
             ),
+
           ],
         ),
       ),
