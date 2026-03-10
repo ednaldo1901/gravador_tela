@@ -202,6 +202,8 @@ class ScreenRecordService : Service() {
         recordMic = intent.getBooleanExtra(EXTRA_RECORD_MIC, true)
         orientationMode = intent.getIntExtra(EXTRA_ORIENTATION_MODE, 0)
 
+        Log.d("REC", "🎬 Modo de orientação selecionado: $orientationMode")
+
         resetState()
         storeLastAppBeforeRecording()
 
@@ -229,6 +231,9 @@ class ScreenRecordService : Service() {
         if (orientationMode == 0) {
             registerRotationListener()
             startPeriodicGameDetection()
+        } else {
+            // Se não for auto, NÃO registra listener de rotação
+            Log.d("REC", "📐 Modo fixo selecionado - sem detecção de rotação")
         }
 
         sendEvent("start")
@@ -729,6 +734,12 @@ class ScreenRecordService : Service() {
             override fun onDisplayChanged(displayId: Int) {
                 if (state != RecState.RECORDING) return
 
+                // Se não for modo AUTO (orientationMode != 0), ignora rotação
+                if (orientationMode != 0) {
+                    Log.d("REC", "⏭️ Modo fixo selecionado - ignorando rotação")
+                    return
+                }
+
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastRotationChangeAt < 800) return
                 lastRotationChangeAt = now
@@ -866,16 +877,46 @@ class ScreenRecordService : Service() {
         val (realW, realH, dpi) = getRealMetrics()
         val isLandscape = (rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270)
 
-        val (w, h) = when {
-            orientationMode == 1 -> Pair(min(realW, realH), max(realW, realH))
-            orientationMode == 2 -> Pair(max(realW, realH), min(realW, realH))
-            orientationMode == 3 -> {
-                val s = min(realW, realH)
-                Pair(s, s)
-            }
-            else -> {
-                if (isLandscape) Pair(max(realW, realH), min(realW, realH))
-                else Pair(min(realW, realH), max(realW, realH))
+        // CORREÇÃO: Primeiro verifica se é modo game
+        val (w, h) = if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME) {
+            // MODO GAME: Força paisagem (resolução máxima)
+            val gameW = max(realW, realH)
+            val gameH = min(realW, realH)
+            Log.d("REC", "🎮 MODO GAME - forçando ${gameW}x${gameH}")
+            Pair(gameW, gameH)
+        } else {
+            // MODO NORMAL: Respeita orientationMode
+            when (orientationMode) {
+                1 -> { // Portrait fixo
+                    val portraitW = min(realW, realH)
+                    val portraitH = max(realW, realH)
+                    Log.d("REC", "📱 MODO RETRATO - ${portraitW}x${portraitH}")
+                    Pair(portraitW, portraitH)
+                }
+                2 -> { // Landscape fixo
+                    val landscapeW = max(realW, realH)
+                    val landscapeH = min(realW, realH)
+                    Log.d("REC", "🌍 MODO PAISAGEM - ${landscapeW}x${landscapeH}")
+                    Pair(landscapeW, landscapeH)
+                }
+                3 -> { // Square
+                    val s = min(realW, realH)
+                    Log.d("REC", "⬛ MODO QUADRADO - ${s}x${s}")
+                    Pair(s, s)
+                }
+                else -> { // Auto (0)
+                    if (isLandscape) {
+                        val autoW = max(realW, realH)
+                        val autoH = min(realW, realH)
+                        Log.d("REC", "🔄 AUTO PAISAGEM - ${autoW}x${autoH}")
+                        Pair(autoW, autoH)
+                    } else {
+                        val autoW = min(realW, realH)
+                        val autoH = max(realW, realH)
+                        Log.d("REC", "🔄 AUTO RETRATO - ${autoW}x${autoH}")
+                        Pair(autoW, autoH)
+                    }
+                }
             }
         }
 
@@ -885,14 +926,14 @@ class ScreenRecordService : Service() {
         outputPfd = pfd
         lastOutputUriString = uri.toString()
 
-        // Guarda TODOS os segmentos temporariamente (serão deletados depois)
+        // Guarda TODOS os segmentos temporariamente
         tempSegmentUris.add(uri.toString())
 
         val metadata = SegmentMetadata(
             index = segmentIndex,
             width = w,
             height = h,
-            isGameMode = (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape),
+            isGameMode = (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME),
             rotation = rot,
             uri = uri.toString()
         )
@@ -906,19 +947,19 @@ class ScreenRecordService : Service() {
                 Log.d("REC", "🎮 Segmento PAISAGEM #${gameSegmentUris.size} salvo para merge (modo game)")
             } else {
                 Log.d("REC", "🗑️ Segmento RETRATO IGNORADO (modo game ativo)")
+                // Em modo game com retrato, não grava
+                return
             }
         }
 
-        val gameInfo = if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape) " 🎮" 
-                      else if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME) " 🗑️" 
-                      else ""
-        Log.d("REC", "🎞️ Segmento #$segmentIndex | ${w}x${h} | rot=$rot$gameInfo")
-
-        // Só inicia o recorder se não for modo game com retrato
-        if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && !isLandscape) {
-            Log.d("REC", "⏭️ Pulando gravação - modo game com retrato")
-            return
+        val modeInfo = when {
+            gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME -> " 🎮"
+            orientationMode == 1 -> " 📱"
+            orientationMode == 2 -> " 🌍"
+            orientationMode == 3 -> " ⬛"
+            else -> " 🔄"
         }
+        Log.d("REC", "🎞️ Segmento #$segmentIndex | ${w}x${h} | rot=$rot$modeInfo")
 
         recorder = MediaRecorder().apply {
             if (recordMic) setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
@@ -955,7 +996,8 @@ class ScreenRecordService : Service() {
             "segmentIndex" to segmentIndex,
             "width" to w,
             "height" to h,
-            "isGameMode" to (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && isLandscape)
+            "isGameMode" to (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME),
+            "orientationMode" to orientationMode
         ))
         notifyUpdateNotification()
     }
@@ -980,6 +1022,16 @@ class ScreenRecordService : Service() {
         try { outputPfd?.close() } catch (_: Exception) {}
         outputPfd = null
         outputUri = null
+    }
+
+    private fun finalizeMediaStoreUri(uri: Uri?) {
+        if (uri == null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                contentResolver.update(uri, values, null, null)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun pauseRecording() {
@@ -1012,6 +1064,7 @@ class ScreenRecordService : Service() {
         }
     }
 
+    // ==================== MÉTODO CORRIGIDO ====================
     private fun stopRecording() {
         if (state == RecState.IDLE) return
 
@@ -1022,6 +1075,7 @@ class ScreenRecordService : Service() {
         Log.d("REC", "   Game Confirmation: $gameConfirmationStatus")
         Log.d("REC", "   Segmentos temporários: ${tempSegmentUris.size}")
         Log.d("REC", "   Segmentos game (paisagem) para merge: ${gameSegmentUris.size}")
+        Log.d("REC", "   Modo de orientação: $orientationMode")
 
         state = RecState.STOPPING
         sendEvent(
@@ -1039,18 +1093,25 @@ class ScreenRecordService : Service() {
         mediaProjection = null
 
         Thread {
-            val finalUri = if (gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
-                              gameSegmentUris.isNotEmpty()) {
-                Log.d("REC", "🎮 Processando ${gameSegmentUris.size} segmentos de game...")
-                mergeGameSegments()
-            } else {
-                // Se não for modo game, não salva nada
-                Log.d("REC", "📱 Modo normal - deletando todos os segmentos")
-                tempSegmentUris.forEach { uriStr ->
-                    try { contentResolver.delete(Uri.parse(uriStr), null, null) } 
-                    catch (e: Exception) { Log.e("REC", "Erro ao deletar $uriStr: ${e.message}") }
+            val finalUri = when {
+                // CASO 1: MODO GAME ATIVADO - Mescla apenas segmentos game
+                gameConfirmationStatus == OrientationChangeType.CONFIRMED_GAME && 
+                gameSegmentUris.isNotEmpty() -> {
+                    Log.d("REC", "🎮 Modo game ativo - mesclando ${gameSegmentUris.size} segmentos")
+                    mergeGameSegments()
                 }
-                null
+                
+                // CASO 2: MODO NORMAL - Salva todos os segmentos temporários
+                tempSegmentUris.isNotEmpty() -> {
+                    Log.d("REC", "📱 Modo normal - salvando ${tempSegmentUris.size} segmentos")
+                    saveNormalSegments()
+                }
+                
+                // CASO 3: NADA A SALVAR
+                else -> {
+                    Log.d("REC", "⚠️ Nenhum segmento para salvar")
+                    null
+                }
             }
 
             finalOutputUriString = finalUri?.toString()
@@ -1067,6 +1128,97 @@ class ScreenRecordService : Service() {
             stopForeground(true)
             stopSelf()
         }.start()
+    }
+
+    // NOVO MÉTODO: Salvar segmentos normais
+    private fun saveNormalSegments(): Uri? {
+        if (tempSegmentUris.isEmpty()) return null
+        
+        // Se só tem um segmento, ele é o vídeo final
+        if (tempSegmentUris.size == 1) {
+            val uri = Uri.parse(tempSegmentUris.first())
+            
+            // Finalizar o único segmento na galeria
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                    contentResolver.update(uri, values, null, null)
+                    Log.d("REC", "✅ Vídeo único finalizado na galeria: $uri")
+                    return uri
+                } catch (e: Exception) {
+                    Log.e("REC", "Erro ao finalizar vídeo: ${e.message}")
+                    return null
+                }
+            }
+            return uri
+        }
+        
+        // Múltiplos segmentos - precisa fazer merge
+        Log.d("REC", "🔄 Mesclando ${tempSegmentUris.size} segmentos normais...")
+        
+        val workDir = File(cacheDir, "ffmerge_normal")
+        workDir.mkdirs()
+        
+        val segFiles = mutableListOf<File>()
+        try {
+            tempSegmentUris.forEachIndexed { idx, uriStr ->
+                val f = File(workDir, "seg_${idx + 1}.mp4")
+                copyUriToFile(contentResolver, Uri.parse(uriStr), f)
+                segFiles.add(f)
+                Log.d("REC", "   Segmento ${idx + 1} copiado")
+            }
+        } catch (e: Exception) {
+            Log.e("REC", "Erro ao copiar segmentos: ${e.message}")
+            return null
+        }
+        
+        val listFile = File(workDir, "list.txt")
+        listFile.writeText(segFiles.joinToString("\n") { "file '${it.absolutePath}'" })
+        
+        val mergedFile = File(workDir, "merged_${System.currentTimeMillis()}.mp4")
+        
+        val cmdCopy = "-y -f concat -safe 0 -i ${listFile.absolutePath} -c copy ${mergedFile.absolutePath}"
+        val result = FFmpegKit.execute(cmdCopy)
+        
+        if (!ReturnCode.isSuccess(result.returnCode)) {
+            Log.e("REC", "Falha no merge dos segmentos")
+            return null
+        }
+        
+        Log.d("REC", "✅ Merge concluído!")
+        
+        val finalUri = createFinalMediaStoreOutput(gameConverted = false)
+        if (finalUri == null) {
+            Log.e("REC", "Falha ao criar arquivo final na galeria")
+            return null
+        }
+        
+        try {
+            contentResolver.openOutputStream(finalUri, "w")?.use { os ->
+                mergedFile.inputStream().use { it.copyTo(os) }
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                contentResolver.update(finalUri, values, null, null)
+            }
+            
+            // Deletar segmentos temporários
+            Log.d("REC", "🗑️ Removendo ${tempSegmentUris.size} segmentos temporários...")
+            tempSegmentUris.forEach { uriStr ->
+                try { contentResolver.delete(Uri.parse(uriStr), null, null) } 
+                catch (e: Exception) { Log.e("REC", "Erro ao deletar $uriStr: ${e.message}") }
+            }
+            
+            Log.d("REC", "✅ Vídeo final salvo na galeria: $finalUri")
+            return finalUri
+            
+        } catch (e: Exception) {
+            Log.e("REC", "Erro ao salvar vídeo final: ${e.message}")
+            return null
+        } finally {
+            cleanup(workDir, segFiles, listFile, mergedFile)
+        }
     }
 
     override fun onDestroy() {

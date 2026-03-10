@@ -28,7 +28,6 @@ class _EditorPageState extends State<EditorPage> {
     super.initState();
     _controller = EditorController();
     
-    // Se veio com vídeo selecionado, carrega automaticamente
     if (widget.initialVideo != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _controller.loadVideo(widget.initialVideo!);
@@ -42,17 +41,14 @@ class _EditorPageState extends State<EditorPage> {
     super.dispose();
   }
 
-  // CORRIGIDO: Método para selecionar vídeo da galeria
   Future<void> _selectVideo() async {
     try {
-      // Verificar permissão
       final PermissionState ps = await PhotoManager.requestPermissionExtend();
       if (!ps.hasAccess) {
         _showError('Permissão negada para acessar a galeria');
         return;
       }
 
-      // Abrir seletor de vídeo
       final List<AssetEntity>? result = await PhotoManager.getAssetPathList(
         type: RequestType.video,
         hasAll: true,
@@ -63,8 +59,6 @@ class _EditorPageState extends State<EditorPage> {
       });
 
       if (result != null && result.isNotEmpty) {
-        // Por simplicidade, pega o primeiro vídeo da lista
-        // Idealmente, você mostraria um grid para o usuário escolher
         await _controller.loadVideo(result.first);
       }
     } catch (e) {
@@ -72,17 +66,14 @@ class _EditorPageState extends State<EditorPage> {
     }
   }
 
-  // Exportar vídeo
   Future<void> _exportVideo(BuildContext context) async {
     final file = await _controller.exportTrimmedVideo();
     
     if (file != null && mounted) {
-      // ignore: use_build_context_synchronously
       _showSuccess(context);
     }
   }
 
-  // Controles do player
   void _togglePlayPause() {
     if (_isPlaying) {
       _controller.videoController?.pause();
@@ -99,7 +90,6 @@ class _EditorPageState extends State<EditorPage> {
     }
   }
 
-  // Utils
   void _showError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -127,8 +117,8 @@ class _EditorPageState extends State<EditorPage> {
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context); // Fecha dialog
-              Navigator.pop(context); // Volta para galeria
+              Navigator.pop(context);
+              Navigator.pop(context);
             },
             child: const Text('Voltar'),
           ),
@@ -136,7 +126,8 @@ class _EditorPageState extends State<EditorPage> {
       ),
     );
   }
-    @override
+
+  @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider.value(
       value: _controller,
@@ -157,13 +148,10 @@ class _EditorPageState extends State<EditorPage> {
               ),
               actions: [
                 if (controller.originalVideo != null) ...[
-                  // Botão Selecionar Vídeo
                   IconButton(
                     icon: const Icon(Icons.video_library, color: Colors.white),
                     onPressed: _selectVideo,
                   ),
-                  
-                  // Botão Salvar
                   IconButton(
                     icon: const Icon(Icons.save, color: Colors.red),
                     onPressed: () => _exportVideo(context),
@@ -186,9 +174,21 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   Widget _buildBody(EditorController controller) {
-    // Se não há vídeo carregado
     if (controller.originalVideo == null) {
-      return Center(
+      return _buildEmptyState();
+    }
+
+    if (controller.state == EditorState.error) {
+      return _buildErrorState(controller);
+    }
+
+    return _buildEditor(controller);
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: SingleChildScrollView(  // ← ADICIONADO para evitar overflow
+        padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -242,12 +242,14 @@ class _EditorPageState extends State<EditorPage> {
             ),
           ],
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    // Se há erro
-    if (controller.state == EditorState.error) {
-      return Center(
+  Widget _buildErrorState(EditorController controller) {
+    return Center(
+      child: SingleChildScrollView(  // ← ADICIONADO
+        padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -280,130 +282,141 @@ class _EditorPageState extends State<EditorPage> {
             ),
           ],
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    // Editor principal
+  Widget _buildEditor(EditorController controller) {
     return SafeArea(
-      child: Column(
-        children: [
-          // Preview do vídeo
-          if (controller.videoController != null)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: EditorPreview(
-                controller: controller.videoController!,
-                isPlaying: _isPlaying,
-                onPlayPause: _togglePlayPause,
-                currentPosition: controller.videoController!.value.position,
-                totalDuration: controller.videoDuration,
-                formatDuration: controller.formatDuration,
+      child: LayoutBuilder(  // ← NOVO: adapta ao espaço disponível
+        builder: (context, constraints) {
+          return SingleChildScrollView(  // ← ADICIONADO para evitar overflow
+            padding: const EdgeInsets.all(16),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight,
               ),
-            ),
-          
-          const SizedBox(height: 16),
-          
-          // Trimmer (corte)
-          if (controller.videoDuration > Duration.zero)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: VideoTrimmer(
-                minValue: 0,
-                maxValue: 1,
-                values: controller.trimRange,
-                onChanged: (values) {
-                  controller.updateTrim(values);
-                  _pauseVideo();
-                },
-                currentDuration: controller.trimEnd - controller.trimStart,
-                totalDuration: controller.videoDuration,
-                formatDuration: controller.formatDuration,
-              ),
-            ),
-          
-          const Spacer(),
-          
-          // Informações e botão de exportar
-          if (controller.exportedFile != null) ...[
-            Container(
-              margin: const EdgeInsets.all(16),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.green.withOpacity(0.3)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.check_circle,
-                    color: Colors.green,
-                    size: 24,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Vídeo exportado com sucesso!',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
+              child: IntrinsicHeight(  // ← Garante altura correta
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Preview do vídeo (tamanho flexível)
+                    if (controller.videoController != null)
+                      AspectRatio(
+                        aspectRatio: controller.videoController!.value.aspectRatio,
+                        child: EditorPreview(
+                          controller: controller.videoController!,
+                          isPlaying: _isPlaying,
+                          onPlayPause: _togglePlayPause,
+                          currentPosition: controller.videoController!.value.position,
+                          totalDuration: controller.videoDuration,
+                          formatDuration: controller.formatDuration,
+                        ),
+                      ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Trimmer (corte)
+                    if (controller.videoDuration > Duration.zero)
+                      VideoTrimmer(
+                        minValue: 0,
+                        maxValue: 1,
+                        values: controller.trimRange,
+                        onChanged: (values) {
+                          controller.updateTrim(values);
+                          _pauseVideo();
+                        },
+                        currentDuration: controller.trimEnd - controller.trimStart,
+                        totalDuration: controller.videoDuration,
+                        formatDuration: controller.formatDuration,
+                      ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Informações e botão de exportar
+                    if (controller.exportedFile != null)
+                      _buildExportedInfo(controller),
+                    
+                    // Botão de exportar
+                    if (controller.exportedFile == null && 
+                        controller.state != EditorState.exporting)
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () => _exportVideo(context),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(30),
+                            ),
+                          ),
+                          child: const Text(
+                            'Exportar Vídeo',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Salvo em: ${controller.exportedPath?.split('/').last}',
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.6),
-                            fontSize: 12,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () {
-                      // Compartilhar
-                    },
-                    icon: const Icon(Icons.share, color: Colors.white),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          
-          // Botão de exportar (se não exportado ainda)
-          if (controller.exportedFile == null)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: controller.state != EditorState.exporting
-                      ? () => _exportVideo(context)
-                      : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
-                  child: const Text(
-                    'Exportar Vídeo',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                      ),
+                  ],
                 ),
               ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildExportedInfo(EditorController controller) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.green.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.green.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.check_circle,
+            color: Colors.green,
+            size: 24,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Vídeo exportado com sucesso!',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Salvo em: ${controller.exportedPath?.split('/').last}',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.6),
+                    fontSize: 12,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            onPressed: () {
+              // Compartilhar
+            },
+            icon: const Icon(Icons.share, color: Colors.white),
+          ),
         ],
       ),
     );

@@ -23,13 +23,15 @@ class VideoTrimmer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      width: double.infinity,
+      padding: const EdgeInsets.all(12), // ← Reduzido padding
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.05),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white.withOpacity(0.1)),
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min, // ← Importante!
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Título
@@ -37,13 +39,12 @@ class VideoTrimmer extends StatelessWidget {
             'Cortar Vídeo',
             style: TextStyle(
               color: Colors.white,
-              fontSize: 16,
+              fontSize: 14, // ← Reduzido
               fontWeight: FontWeight.w600,
             ),
           ),
-          
-          const SizedBox(height: 20),
-          
+
+          const SizedBox(height: 12), // ← Reduzido
           // Range Slider
           RangeSlider(
             values: values,
@@ -58,12 +59,12 @@ class VideoTrimmer extends StatelessWidget {
             ),
             onChanged: onChanged,
           ),
-          
-          const SizedBox(height: 16),
-          
-          // Informações de tempo
+
+          const SizedBox(height: 8),
+
+          // Informações de tempo em linha (não coluna)
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
               _buildTimeInfo(
                 'Início',
@@ -82,20 +83,6 @@ class VideoTrimmer extends StatelessWidget {
               ),
             ],
           ),
-          
-          const SizedBox(height: 8),
-          
-          // Progresso visual
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: (totalDuration.inMilliseconds - currentDuration.inMilliseconds) / 
-                     totalDuration.inMilliseconds,
-              backgroundColor: Colors.white.withOpacity(0.1),
-              valueColor: const AlwaysStoppedAnimation<Color>(Colors.red),
-              minHeight: 6,
-            ),
-          ),
         ],
       ),
     );
@@ -103,32 +90,33 @@ class VideoTrimmer extends StatelessWidget {
 
   Widget _buildTimeInfo(String label, String time, IconData icon) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.03),
-        borderRadius: BorderRadius.circular(8),
-      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 4,
+      ), // ← Reduzido
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 14, color: Colors.white70),
-              const SizedBox(width: 4),
+              Icon(icon, size: 12, color: Colors.white70),
+              const SizedBox(width: 2),
               Text(
                 label,
                 style: TextStyle(
                   color: Colors.white.withOpacity(0.7),
-                  fontSize: 12,
+                  fontSize: 10, // ← Reduzido
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Text(
             time,
             style: const TextStyle(
               color: Colors.white,
-              fontSize: 14,
+              fontSize: 11, // ← Reduzido
               fontWeight: FontWeight.w600,
             ),
           ),

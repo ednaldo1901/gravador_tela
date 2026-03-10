@@ -7,8 +7,6 @@ import 'package:gravador_tela/core/platform/screen_recorder_channel.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-
-
 enum RecordingState { idle, recording, paused, stopping }
 
 class RecordingController extends ChangeNotifier {
@@ -55,6 +53,7 @@ class RecordingController extends ChangeNotifier {
       final idx = savedIndex.clamp(0, OrientationMode.values.length - 1);
       _orientationMode = OrientationMode.values[idx];
       notifyListeners();
+      debugPrint('📐 Modo de orientação carregado: ${_orientationMode.name} (índice: $idx)');
     } catch (e) {
       debugPrint('⚠️ Erro ao carregar modo de orientação: $e');
     }
@@ -62,11 +61,14 @@ class RecordingController extends ChangeNotifier {
 
   Future<void> setOrientationMode(OrientationMode mode) async {
     if (_orientationMode == mode) return;
+    
+    debugPrint('📐 Alterando modo de orientação: ${_orientationMode.name} -> ${mode.name}');
     _orientationMode = mode;
 
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('orientationMode', mode.index);
+      debugPrint('💾 Modo de orientação salvo: ${mode.index}');
     } catch (e) {
       debugPrint('⚠️ Erro ao salvar modo de orientação: $e');
     }
@@ -82,25 +84,29 @@ class RecordingController extends ChangeNotifier {
     final realW = (size.width * pixelRatio).round();
     final realH = (size.height * pixelRatio).round();
 
+    debugPrint('📱 Dimensões reais da tela: ${realW}x${realH} (pixelRatio: $pixelRatio)');
+
     switch (_orientationMode) {
       case OrientationMode.portrait:
-        return {
-          'width': realW < realH ? realW : realH,
-          'height': realW < realH ? realH : realW,
-        };
+        final w = realW < realH ? realW : realH;
+        final h = realW < realH ? realH : realW;
+        debugPrint('📱 Modo RETRATO: ${w}x$h');
+        return {'width': w, 'height': h};
 
       case OrientationMode.landscape:
-        return {
-          'width': realW > realH ? realW : realH,
-          'height': realW > realH ? realH : realW,
-        };
+        final w = realW > realH ? realW : realH;
+        final h = realW > realH ? realH : realW;
+        debugPrint('🌍 Modo PAISAGEM: ${w}x$h');
+        return {'width': w, 'height': h};
 
       case OrientationMode.square:
         final s = (realW < realH ? realW : realH).clamp(720, 1080);
+        debugPrint('⬛ Modo QUADRADO: ${s}x$s');
         return {'width': s, 'height': s};
 
       case OrientationMode.auto:
       default:
+        debugPrint('🔄 Modo AUTO: ${realW}x$realH');
         return {'width': realW, 'height': realH};
     }
   }
@@ -113,6 +119,9 @@ class RecordingController extends ChangeNotifier {
     final type = (map['type'] as String?) ?? '';
     final s = (map['state'] as String?) ?? 'idle';
     final ms = (map['elapsed'] as int?) ?? 0;
+    final gameStatus = map['gameConfirmationStatus'] as String?;
+
+    debugPrint('📡 EventChannel: type=$type, state=$s, gameStatus=$gameStatus');
 
     // estado + timer
     if (s == 'recording') {
@@ -138,6 +147,7 @@ class RecordingController extends ChangeNotifier {
     final maybeFinal = map['finalUri'] as String?;
     if (maybeFinal != null && maybeFinal.isNotEmpty) {
       finalUri = maybeFinal;
+      debugPrint('💾 Vídeo final recebido: $finalUri');
     }
 
     notifyListeners();
@@ -146,6 +156,7 @@ class RecordingController extends ChangeNotifier {
     if (type == 'stop') {
       if ((finalUri == null || finalUri!.isEmpty) && (lastUri?.isNotEmpty ?? false)) {
         finalUri = lastUri;
+        debugPrint('⚠️ Fallback: usando lastUri como finalUri');
         notifyListeners();
       }
     }
@@ -154,11 +165,14 @@ class RecordingController extends ChangeNotifier {
   // ------------------ sync fallback ------------------
 
   Future<void> syncFromNative() async {
+    debugPrint('🔄 Sincronizando com native...');
     final st = await ScreenRecorderChannel.getStatus();
 
     final s = (st['state'] as String?) ?? 'idle';
     lastUri = st['lastUri'] as String?;
     final ms = (st['elapsed'] is int) ? (st['elapsed'] as int) : 0;
+
+    debugPrint('📊 Status native: state=$s, lastUri=$lastUri, elapsed=$ms');
 
     if (s == 'recording') {
       state = RecordingState.recording;
@@ -183,9 +197,11 @@ class RecordingController extends ChangeNotifier {
   // ------------------ permissões ------------------
 
   Future<void> _ensurePerms() async {
+    debugPrint('🔐 Verificando permissões...');
     final mic = await Permission.microphone.request();
     if (!mic.isGranted) throw Exception('Permissão do microfone negada.');
     await Permission.notification.request();
+    debugPrint('✅ Permissões OK');
   }
 
   // ------------------ actions ------------------
@@ -193,6 +209,7 @@ class RecordingController extends ChangeNotifier {
   Future<void> start(BuildContext context) async {
     if (state == RecordingState.recording || state == RecordingState.paused) return;
 
+    debugPrint('🎬 Iniciando gravação...');
     await _ensurePerms();
 
     // zera vídeo final anterior
@@ -204,7 +221,7 @@ class RecordingController extends ChangeNotifier {
 
     final bitrate = (w * h >= 1920 * 1080) ? 12 * 1000 * 1000 : 8 * 1000 * 1000;
 
-    debugPrint('🎥 Start: mode=${_orientationMode.name} ${w}x$h');
+    debugPrint('🎥 Start: mode=${_orientationMode.name} (index=${_orientationMode.index}) ${w}x$h bitrate=${bitrate ~/ 1000000}Mbps');
 
     await ScreenRecorderChannel.start(
       width: w,
@@ -218,7 +235,10 @@ class RecordingController extends ChangeNotifier {
     // mostra bolha se permitido
     try {
       final ok = await OverlayBubbleChannel.hasPermission();
-      if (ok) await OverlayBubbleChannel.show();
+      if (ok) {
+        await OverlayBubbleChannel.show();
+        debugPrint('💬 Bolha flutuante ativada');
+      }
     } catch (e) {
       debugPrint('⚠️ Falha ao mostrar bolha: $e');
     }
@@ -227,29 +247,35 @@ class RecordingController extends ChangeNotifier {
     elapsed = Duration.zero;
     _startTimer();
     notifyListeners();
+    debugPrint('✅ Gravação iniciada');
   }
 
   Future<void> pause() async {
     if (state != RecordingState.recording) return;
+    debugPrint('⏸️ Pausando gravação...');
     await ScreenRecorderChannel.pause();
 
     state = RecordingState.paused;
     _stopTimer();
     notifyListeners();
+    debugPrint('⏸️ Gravação pausada');
   }
 
   Future<void> resume() async {
     if (state != RecordingState.paused) return;
+    debugPrint('▶️ Retomando gravação...');
     await ScreenRecorderChannel.resume();
 
     state = RecordingState.recording;
     _startTimer();
     notifyListeners();
+    debugPrint('▶️ Gravação retomada');
   }
 
   Future<void> stop() async {
     if (state == RecordingState.idle) return;
 
+    debugPrint('⏹️ Parando gravação...');
     state = RecordingState.stopping;
     notifyListeners();
 
@@ -257,6 +283,7 @@ class RecordingController extends ChangeNotifier {
 
     try {
       await OverlayBubbleChannel.hide();
+      debugPrint('💬 Bolha flutuante desativada');
     } catch (e) {
       debugPrint('⚠️ Falha ao esconder bolha: $e');
     }
@@ -264,15 +291,18 @@ class RecordingController extends ChangeNotifier {
     // o evento "stop" vai chegar com finalUri (merge Android).
     // sync aqui é só fallback.
     await syncFromNative();
+    debugPrint('⏹️ Gravação finalizada');
   }
 
   // ------------------ timer local (UI suave) ------------------
 
   void _startTimer() {
-    _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       elapsed += const Duration(seconds: 1);
       notifyListeners();
     });
+    debugPrint('⏱️ Timer iniciado');
   }
 
   void _startTimerFromNative(int ms) {
@@ -282,15 +312,18 @@ class RecordingController extends ChangeNotifier {
       elapsed += const Duration(seconds: 1);
       notifyListeners();
     });
+    debugPrint('⏱️ Timer sincronizado com native: ${elapsed.inSeconds}s');
   }
 
   void _stopTimer() {
     _timer?.cancel();
     _timer = null;
+    debugPrint('⏱️ Timer parado');
   }
 
   @override
   void dispose() {
+    debugPrint('🗑️ Disposing RecordingController');
     _eventSub?.cancel();
     _stopTimer();
     super.dispose();

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
-class EditorPreview extends StatefulWidget {
+class EditorPreview extends StatelessWidget {
   final VideoPlayerController controller;
   final bool isPlaying;
   final VoidCallback onPlayPause;
@@ -20,13 +20,9 @@ class EditorPreview extends StatefulWidget {
   }) : super(key: key);
 
   @override
-  State<EditorPreview> createState() => _EditorPreviewState();
-}
-
-class _EditorPreviewState extends State<EditorPreview> {
-  @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity,  // ← Ocupa toda largura
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white.withOpacity(0.2)),
@@ -36,11 +32,11 @@ class _EditorPreviewState extends State<EditorPreview> {
         children: [
           // Vídeo
           AspectRatio(
-            aspectRatio: widget.controller.value.aspectRatio,
-            child: VideoPlayer(widget.controller),
+            aspectRatio: controller.value.aspectRatio,
+            child: VideoPlayer(controller),
           ),
           
-          // Overlay escuro para melhor visibilidade dos controles
+          // Overlay escuro
           Positioned.fill(
             child: Container(
               decoration: BoxDecoration(
@@ -57,61 +53,64 @@ class _EditorPreviewState extends State<EditorPreview> {
             ),
           ),
           
-          // Controles
+          // Controles (agora com padding seguro)
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
             child: Container(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),  // ← Reduzido para caber melhor
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,  // ← Importante!
                 children: [
                   // Botão Play/Pause
                   IconButton(
-                    onPressed: widget.onPlayPause,
+                    onPressed: onPlayPause,
                     icon: Icon(
-                      widget.isPlaying
+                      isPlaying
                           ? Icons.pause_circle_filled
                           : Icons.play_circle_filled,
                       color: Colors.white,
-                      size: 48,
+                      size: 40,  // ← Reduzido de 48 para 40
                     ),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
                   ),
                   
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   
                   // Barra de progresso e tempo
                   Row(
                     children: [
                       Text(
-                        widget.formatDuration(widget.currentPosition),
+                        formatDuration(currentPosition),
                         style: const TextStyle(
                           color: Colors.white70,
-                          fontSize: 12,
+                          fontSize: 11,  // ← Reduzido
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
+                          borderRadius: BorderRadius.circular(2),
                           child: LinearProgressIndicator(
-                            value: widget.totalDuration.inMilliseconds > 0
-                                ? widget.currentPosition.inMilliseconds /
-                                    widget.totalDuration.inMilliseconds
+                            value: totalDuration.inMilliseconds > 0
+                                ? currentPosition.inMilliseconds /
+                                    totalDuration.inMilliseconds
                                 : 0,
                             backgroundColor: Colors.white.withOpacity(0.2),
                             valueColor: const AlwaysStoppedAnimation<Color>(Colors.red),
-                            minHeight: 4,
+                            minHeight: 3,  // ← Reduzido
                           ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        widget.formatDuration(widget.totalDuration),
+                        formatDuration(totalDuration),
                         style: const TextStyle(
                           color: Colors.white70,
-                          fontSize: 12,
+                          fontSize: 11,  // ← Reduzido
                         ),
                       ),
                     ],

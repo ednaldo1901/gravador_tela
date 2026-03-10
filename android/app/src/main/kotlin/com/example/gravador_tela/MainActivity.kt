@@ -8,10 +8,16 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFprobeKit  // ← IMPORTANTE: Usar FFprobeKit para obter informações
+import com.arthenica.ffmpegkit.ReturnCode
+import com.arthenica.ffmpegkit.MediaInformation
+import com.arthenica.ffmpegkit.StreamInformation
 
 class MainActivity : FlutterActivity() {
 
@@ -100,7 +106,6 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
-                    // NOVOS MÉTODOS PARA USAGE STATS
                     "hasUsageStatsPermission" -> {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                             val appOps = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
@@ -139,6 +144,31 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    // MÉTODOS DO EDITOR
+                    "trimVideo" -> {
+                        val inputPath = call.argument<String>("inputPath") ?: ""
+                        val outputPath = call.argument<String>("outputPath") ?: ""
+                        val startSeconds = call.argument<Double>("startSeconds") ?: 0.0
+                        val durationSeconds = call.argument<Double>("durationSeconds") ?: 0.0
+                        
+                        val success = trimVideo(inputPath, outputPath, startSeconds, durationSeconds)
+                        val map = hashMapOf<String, Any?>(
+                            "success" to success,
+                            "outputPath" to outputPath
+                        )
+                        result.success(map)
+                    }
+
+                    "getVideoInfo" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        val info = getVideoInfo(path)
+                        result.success(info)
+                    }
+
+                    "checkFFmpeg" -> {
+                        result.success(true)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -165,7 +195,7 @@ class MainActivity : FlutterActivity() {
         when (requestCode) {
             REQ_MEDIA_PROJ -> handleMediaProjectionResult(resultCode, data)
             REQ_OVERLAY_PERM -> {
-                // Nada a fazer, apenas retornar
+                // Nada a fazer
             }
         }
     }
@@ -197,6 +227,62 @@ class MainActivity : FlutterActivity() {
             startForegroundService(intent)
         } else {
             startService(intent)
+        }
+    }
+
+    // MÉTODO CORRIGIDO: trimVideo
+    private fun trimVideo(inputPath: String, outputPath: String, startSeconds: Double, durationSeconds: Double): Boolean {
+        return try {
+            Log.d("FFmpeg", "Cortando vídeo: $inputPath -> $outputPath")
+            Log.d("FFmpeg", "Início: ${startSeconds}s, Duração: ${durationSeconds}s")
+            
+            val cmd = "-y -i $inputPath -ss $startSeconds -t $durationSeconds -c copy $outputPath"
+            val session = FFmpegKit.execute(cmd)
+            val success = ReturnCode.isSuccess(session.returnCode)
+            
+            if (success) {
+                Log.d("FFmpeg", "✅ Vídeo cortado com sucesso: $outputPath")
+            } else {
+                Log.e("FFmpeg", "❌ Falha ao cortar vídeo: ${session.output}")
+            }
+            
+            success
+        } catch (e: Exception) {
+            Log.e("FFmpeg", "Erro ao cortar vídeo: ${e.message}")
+            false
+        }
+    }
+
+    // MÉTODO CORRIGIDO: getVideoInfo usando FFprobeKit
+    private fun getVideoInfo(path: String): Map<String, Any>? {
+        return try {
+            Log.d("FFmpeg", "Obtendo informações do vídeo: $path")
+            
+            // CORREÇÃO: Usar FFprobeKit em vez de FFmpegKit.getMediaInformation
+            val session = FFprobeKit.getMediaInformation(path)
+            val mediaInfo = session.mediaInformation
+            
+            if (mediaInfo == null) {
+                Log.e("FFmpeg", "Não foi possível obter informações do vídeo")
+                return null
+            }
+            
+            val streams = mediaInfo.streams
+            val stream = streams?.firstOrNull()
+            
+            val info = mapOf(
+                "duration" to (mediaInfo.duration?.toLong() ?: 0),
+                "width" to (stream?.width ?: 0),
+                "height" to (stream?.height ?: 0),
+                "bitrate" to (mediaInfo.bitrate?.toLong() ?: 0),
+                "codec" to (stream?.codec ?: "")
+            )
+            
+            Log.d("FFmpeg", "Informações obtidas: $info")
+            info
+        } catch (e: Exception) {
+            Log.e("FFmpeg", "Erro ao obter informações: ${e.message}")
+            null
         }
     }
 }
