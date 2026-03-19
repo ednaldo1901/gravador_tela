@@ -9,11 +9,8 @@ import 'editor_preview.dart';
 
 class EditorPage extends StatefulWidget {
   final AssetEntity? initialVideo;
-  
-  const EditorPage({
-    super.key,
-    this.initialVideo,
-  });
+
+  const EditorPage({super.key, this.initialVideo});
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -27,7 +24,7 @@ class _EditorPageState extends State<EditorPage> {
   void initState() {
     super.initState();
     _controller = EditorController();
-    
+
     if (widget.initialVideo != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _controller.loadVideo(widget.initialVideo!);
@@ -49,14 +46,15 @@ class _EditorPageState extends State<EditorPage> {
         return;
       }
 
-      final List<AssetEntity>? result = await PhotoManager.getAssetPathList(
-        type: RequestType.video,
-        hasAll: true,
-      ).then((albums) async {
-        if (albums.isEmpty) return null;
-        final recent = albums.first;
-        return await recent.getAssetListPaged(page: 0, size: 100);
-      });
+      final List<AssetEntity>? result =
+          await PhotoManager.getAssetPathList(
+            type: RequestType.video,
+            hasAll: true,
+          ).then((albums) async {
+            if (albums.isEmpty) return null;
+            final recent = albums.first;
+            return await recent.getAssetListPaged(page: 0, size: 100);
+          });
 
       if (result != null && result.isNotEmpty) {
         await _controller.loadVideo(result.first);
@@ -68,7 +66,7 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _exportVideo(BuildContext context) async {
     final file = await _controller.exportTrimmedVideo();
-    
+
     if (file != null && mounted) {
       _showSuccess(context);
     }
@@ -102,13 +100,29 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   void _showSuccess(BuildContext context) {
+    final controller = _controller;
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Sucesso!'),
-        content: const Text(
-          'Vídeo exportado com sucesso!\n'
-          'Ele foi salvo nos seus documentos.',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Vídeo exportado com sucesso!'),
+            const SizedBox(height: 8),
+            Text(
+              'Salvo em: Movies/ScreenRecords/',
+              style: TextStyle(color: Colors.green[700], fontSize: 12),
+            ),
+            if (controller.exportedAsset != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Título: ${controller.exportedAsset!.title}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(
@@ -117,10 +131,10 @@ class _EditorPageState extends State<EditorPage> {
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
+              Navigator.pop(context); // Fecha dialog
+              Navigator.pop(context); // Volta para galeria
             },
-            child: const Text('Voltar'),
+            child: const Text('Ver na Galeria'),
           ),
         ],
       ),
@@ -160,8 +174,9 @@ class _EditorPageState extends State<EditorPage> {
               ],
             ),
             body: LoadingOverlay(
-              isLoading: controller.state == EditorState.loading ||
-                         controller.state == EditorState.exporting,
+              isLoading:
+                  controller.state == EditorState.loading ||
+                  controller.state == EditorState.exporting,
               message: controller.state == EditorState.loading
                   ? 'Carregando vídeo...'
                   : 'Exportando vídeo...',
@@ -187,7 +202,8 @@ class _EditorPageState extends State<EditorPage> {
 
   Widget _buildEmptyState() {
     return Center(
-      child: SingleChildScrollView(  // ← ADICIONADO para evitar overflow
+      child: SingleChildScrollView(
+        // ← ADICIONADO para evitar overflow
         padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -248,16 +264,13 @@ class _EditorPageState extends State<EditorPage> {
 
   Widget _buildErrorState(EditorController controller) {
     return Center(
-      child: SingleChildScrollView(  // ← ADICIONADO
+      child: SingleChildScrollView(
+        // ← ADICIONADO
         padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.error_outline,
-              size: 64,
-              color: Colors.red,
-            ),
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
             const SizedBox(height: 16),
             Text(
               'Erro ao carregar vídeo',
@@ -288,34 +301,37 @@ class _EditorPageState extends State<EditorPage> {
 
   Widget _buildEditor(EditorController controller) {
     return SafeArea(
-      child: LayoutBuilder(  // ← NOVO: adapta ao espaço disponível
+      child: LayoutBuilder(
+        // ← NOVO: adapta ao espaço disponível
         builder: (context, constraints) {
-          return SingleChildScrollView(  // ← ADICIONADO para evitar overflow
+          return SingleChildScrollView(
+            // ← ADICIONADO para evitar overflow
             padding: const EdgeInsets.all(16),
             child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: constraints.maxHeight,
-              ),
-              child: IntrinsicHeight(  // ← Garante altura correta
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: IntrinsicHeight(
+                // ← Garante altura correta
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     // Preview do vídeo (tamanho flexível)
                     if (controller.videoController != null)
                       AspectRatio(
-                        aspectRatio: controller.videoController!.value.aspectRatio,
+                        aspectRatio:
+                            controller.videoController!.value.aspectRatio,
                         child: EditorPreview(
                           controller: controller.videoController!,
                           isPlaying: _isPlaying,
                           onPlayPause: _togglePlayPause,
-                          currentPosition: controller.videoController!.value.position,
+                          currentPosition:
+                              controller.videoController!.value.position,
                           totalDuration: controller.videoDuration,
                           formatDuration: controller.formatDuration,
                         ),
                       ),
-                    
+
                     const SizedBox(height: 16),
-                    
+
                     // Trimmer (corte)
                     if (controller.videoDuration > Duration.zero)
                       VideoTrimmer(
@@ -326,19 +342,20 @@ class _EditorPageState extends State<EditorPage> {
                           controller.updateTrim(values);
                           _pauseVideo();
                         },
-                        currentDuration: controller.trimEnd - controller.trimStart,
+                        currentDuration:
+                            controller.trimEnd - controller.trimStart,
                         totalDuration: controller.videoDuration,
                         formatDuration: controller.formatDuration,
                       ),
-                    
+
                     const SizedBox(height: 16),
-                    
+
                     // Informações e botão de exportar
                     if (controller.exportedFile != null)
                       _buildExportedInfo(controller),
-                    
+
                     // Botão de exportar
-                    if (controller.exportedFile == null && 
+                    if (controller.exportedFile == null &&
                         controller.state != EditorState.exporting)
                       SizedBox(
                         width: double.infinity,
@@ -381,11 +398,7 @@ class _EditorPageState extends State<EditorPage> {
       ),
       child: Row(
         children: [
-          const Icon(
-            Icons.check_circle,
-            color: Colors.green,
-            size: 24,
-          ),
+          const Icon(Icons.check_circle, color: Colors.green, size: 24),
           const SizedBox(width: 12),
           Expanded(
             child: Column(

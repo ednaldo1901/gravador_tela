@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import '../../core/platform/ffmpeg_channel.dart';
 
@@ -32,6 +31,7 @@ class EditorController extends ChangeNotifier {
   // Vídeo exportado
   File? exportedFile;
   String? exportedPath;
+  AssetEntity? exportedAsset;  // NOVO: Asset da galeria
   
   @override
   void dispose() {
@@ -97,7 +97,7 @@ class EditorController extends ChangeNotifier {
     return '${twoDigits(d.inHours)}:$twoDigitMinutes:$twoDigitSeconds';
   }
   
-  // Exportar vídeo cortado
+  // Exportar vídeo cortado para a galeria
   Future<File?> exportTrimmedVideo() async {
     try {
       state = EditorState.exporting;
@@ -106,7 +106,7 @@ class EditorController extends ChangeNotifier {
       
       if (originalFile == null) throw Exception('Nenhum vídeo carregado');
       
-      // Usar FFmpegChannel para cortar
+      // Usar FFmpegChannel para cortar (já salva na galeria)
       final trimmedFile = await FFmpegChannel.trimVideo(
         inputPath: originalFile!.path,
         startSeconds: trimStart.inMilliseconds / 1000,
@@ -119,6 +119,9 @@ class EditorController extends ChangeNotifier {
       
       exportedFile = trimmedFile;
       exportedPath = trimmedFile.path;
+      
+      // Buscar o asset recém-criado na galeria
+      await _refreshExportedAsset();
       
       state = EditorState.done;
       notifyListeners();
@@ -133,6 +136,39 @@ class EditorController extends ChangeNotifier {
     }
   }
   
+  // NOVO: Buscar o asset na galeria pelo caminho
+  Future<void> _refreshExportedAsset() async {
+    if (exportedPath == null) return;
+    
+    try {
+      final PermissionState ps = await PhotoManager.requestPermissionExtend();
+      if (!ps.hasAccess) return;
+      
+      final albums = await PhotoManager.getAssetPathList(
+        type: RequestType.video,
+        hasAll: true,
+        onlyAll: true,
+      );
+      
+      if (albums.isEmpty) return;
+      
+      final all = albums.first;
+      final assets = await all.getAssetListPaged(page: 0, size: 100);
+      
+      // Encontrar o vídeo mais recente que corresponde ao nosso arquivo
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final recent = assets.firstWhere(
+        (asset) => (now - asset.createDateTime.millisecondsSinceEpoch) < 5000,
+        orElse: () => assets.first,
+      );
+      
+      exportedAsset = recent;
+      
+    } catch (e) {
+      debugPrint('Erro ao buscar asset: $e');
+    }
+  }
+  
   // Resetar editor
   void reset() {
     videoController?.dispose();
@@ -140,6 +176,7 @@ class EditorController extends ChangeNotifier {
     originalVideo = null;
     originalFile = null;
     exportedFile = null;
+    exportedAsset = null;
     state = EditorState.idle;
     errorMessage = null;
     notifyListeners();
