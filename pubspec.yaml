@@ -3,18 +3,15 @@ description: 'A new Flutter project.'
 
 publish_to: 'none' #
 
-
 version: 1.0.0+1
 
 environment:
   sdk: ^3.10.1
 
-
 dependencies:
   flutter:
     sdk: flutter
 
-  
   cupertino_icons: ^1.0.8
   permission_handler: ^11.3.1
   photo_manager: ^3.8.3
@@ -25,34 +22,27 @@ dependencies:
   google_nav_bar: ^5.0.6
   shared_preferences: ^2.2.3
   path_provider: ^2.1.5
-  video_editor: ^3.0.0  # Para edição de vídeo
-  file_picker: ^8.0.0   # Para selecionar arquivos
-  path: ^1.9.0          # Para manipulação de caminhos
-  
-
+  video_editor: ^3.0.0 # Para edição de vídeo
+  file_picker: ^8.0.0 # Para selecionar arquivos
+  path: ^1.9.0 # Para manipulação de caminhos
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
- 
   flutter_lints: ^6.0.0
-
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
-  
   uses-material-design: true
 
-  
   assets:
     - assets/images/bg.png
     - assets/images/bg_1.jpg
     - assets/images/bg_2.jpg
     - assets/images/bg_3.jpg
     - assets/images/bg_4.jpg
-    
 
- 
   # example:
   # fonts:
   #   - family: Schyler
@@ -68,3 +58,11 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+flutter_launcher_icons:
+  android: 'launcher_icon'
+  ios: true
+  image_path: 'assets/icon/icon.png'
+  min_sdk_android: 21 # android min sdk min:16, default 21
+  remove_alpha_ios: true
+  adaptive_icon_background: "#3A3A3A"
+  adaptive_icon_foreground: "assets/icon.png"
